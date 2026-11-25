@@ -1,3 +1,3 @@
-add_executable(escrow main.c)
+add_executable(escrow main.c jail.c overlay.c diff.c)
 target_link_libraries(escrow PRIVATE escrow::common)
 install(TARGETS escrow)
