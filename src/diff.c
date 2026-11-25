@@ -42,8 +42,9 @@ static bool complete = true;
 // the mode afterwards, so it does modify the change set while it runs.
 // Guarantee: each entry is pushed *before* its chmod, popped after its
 // restore, and atexit restores whatever is still pushed if err() exits
-// mid-walk. TERM/HUP don't kill us while the walk runs (see jail.c).
-// Only SIGKILL can leave a mode relaxed.
+// mid-walk. INT/QUIT/PIPE are ignored and TERM/HUP only kill the agent
+// (see jail.c), so a closed stdout is an EPIPE -> err() -> restore. Only
+// SIGKILL or a crash can leave a mode relaxed.
 struct relax_entry {
   int dirfd;
   const char *name;

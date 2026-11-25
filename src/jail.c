@@ -8,6 +8,7 @@
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
@@ -77,9 +78,10 @@ static int enter_ns(uid_t uid, gid_t gid) {
                                pid_t parent) {
   if (enter_ns(uid, gid) < 0)
     _exit(JAIL_SETUP_FAILED);
-  // If escrow dies (even SIGKILL), take the agent down with it. Set after
-  // unshare, which changes our creds and so clears the death signal. The
-  // getppid check covers a parent that died before the prctl.
+  // If escrow dies (even SIGKILL), take the agent down with it. It survives
+  // exec of an ordinary binary. Only a privilege-gaining exec or a setuid
+  // family call clears it. The getppid check covers a parent that died
+  // before the prctl.
   if (prctl(PR_SET_PDEATHSIG, SIGKILL) < 0) {
     warn("prctl PR_SET_PDEATHSIG");
     _exit(JAIL_SETUP_FAILED);
@@ -90,6 +92,12 @@ static int enter_ns(uid_t uid, gid_t gid) {
     _exit(JAIL_SETUP_FAILED);
   if (chdir(run->merged) < 0) {
     warn("chdir %s", run->merged);
+    _exit(JAIL_SETUP_FAILED);
+  }
+  // The inherited $PWD names the real workspace. Tools that build paths
+  // from it (make's $(PWD), shells) would write straight to the host.
+  if (setenv("PWD", run->merged, 1) < 0) {
+    warn("setenv PWD");
     _exit(JAIL_SETUP_FAILED);
   }
   execvp(argv[0], argv);
@@ -115,25 +123,29 @@ static void kill_agent(int sig) {
 // mid-reparent, so an empty list polls (WNOHANG) rather than blocking on a
 // live child we never signalled. A tree that forks faster than we kill can
 // keep this looping; M2's pid ns closes that by killing the whole ns.
-static void reap_all(void) {
+static int children(bool kill_them) {
   static const char path[] = "/proc/thread-self/children";
+  int pid, n = 0;
 
+  FILE *f = fopen(path, "re");
+  if (!f)
+    err(1, "open %s", path);
+  while (fscanf(f, "%d", &pid) == 1) {
+    // Our unreaped child: the pid can't have been recycled.
+    if (kill_them && kill(pid, SIGKILL) < 0 && errno != ESRCH)
+      err(1, "kill %d", pid);
+    n++;
+  }
+  if (ferror(f))
+    err(1, "read %s", path);
+  if (fclose(f) == EOF)
+    err(1, "close %s", path);
+  return n;
+}
+
+static void reap_all(void) {
   for (;;) {
-    FILE *f = fopen(path, "re");
-    if (!f)
-      err(1, "open %s", path);
-    int pid, n = 0;
-    while (fscanf(f, "%d", &pid) == 1) {
-      // Our unreaped child: the pid can't have been recycled.
-      if (kill(pid, SIGKILL) < 0 && errno != ESRCH)
-        err(1, "kill %d", pid);
-      n++;
-    }
-    if (ferror(f))
-      err(1, "read %s", path);
-    if (fclose(f) == EOF)
-      err(1, "close %s", path);
-
+    int n = children(true);
     if (waitpid(-1, nullptr, n ? 0 : WNOHANG) < 0) {
       if (errno == ECHILD)
         return;
@@ -156,6 +168,11 @@ int jail_run(const struct run *run, const char *ws, char *const argv[]) {
   // and waitpid would fail with ECHILD.
   if (sigaction(SIGCHLD, &sa, nullptr) < 0)
     err(1, "sigaction SIGCHLD");
+  // reap_all kills every child we have. Children inherited from whatever
+  // exec'd us (`sh -c 'job & exec escrow ...'`) aren't the agent's.
+  if (children(false) > 0)
+    errx(1, "already have child processes (inherited across exec); "
+            "run escrow without background jobs in the same process");
   if (prctl(PR_SET_CHILD_SUBREAPER, 1) < 0)
     err(1, "prctl PR_SET_CHILD_SUBREAPER");
   if (fflush(nullptr) == EOF)
@@ -176,6 +193,10 @@ int jail_run(const struct run *run, const char *ws, char *const argv[]) {
     err(1, "sigaction SIGINT");
   if (sigaction(SIGQUIT, &sa, nullptr) < 0)
     err(1, "sigaction SIGQUIT");
+  // `escrow | head` must not kill us mid-walk with modes relaxed: a closed
+  // stdout becomes EPIPE, then err(), then the atexit restore.
+  if (sigaction(SIGPIPE, &sa, nullptr) < 0)
+    err(1, "sigaction SIGPIPE");
   sa.sa_handler = kill_agent;
   sa.sa_flags = SA_RESTART;
   if (sigaction(SIGTERM, &sa, nullptr) < 0)
