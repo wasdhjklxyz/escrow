@@ -1,5 +1,7 @@
 #include "diff.h"
 
+#include "overlay.h"
+
 #include <dirent.h>
 #include <err.h>
 #include <errno.h>
@@ -15,13 +17,16 @@
 
 // Lower-side dir fd sentinels: no lower dir at all (everything is new), or
 // a lower dir exists but we can't read it (nothing can be compared).
-enum { LOWER_NONE = -1, LOWER_UNKNOWN = -2 };
+enum { LOWER_NONE = -1, LOWER_UNREADABLE = -2 };
 
 // Result of looking an entry up on the lower side.
-enum lookup { ABSENT, PRESENT, UNKNOWN };
+enum lookup { LOOKUP_ABSENT, LOOKUP_PRESENT, LOOKUP_UNREADABLE };
 
 // Result of comparing an upper entry with its lower counterpart.
-enum cmp { SAME, CHANGED, UNREADABLE };
+enum cmp { CMP_SAME, CMP_CHANGED, CMP_UNREADABLE };
+
+// Worst case for quote(): every byte becomes \ooo, plus quotes and NUL.
+enum { QUOTE_MAX = 4 * PATH_MAX + 3 };
 
 // Relative path of the entry being visited. Every name is appended with
 // push(), and a directory's prefix ends in '/'.
@@ -29,46 +34,91 @@ static char path[PATH_MAX];
 static bool complete = true;
 
 // The agent may chmod upper entries so we (the same uid, without its
-// in-ns capabilities) can't read them. We add u+r(x) for the walk and put
-// the mode back afterwards. The list lives in the walk's stack frames, and
-// atexit restores whatever is still relaxed if err() exits mid-walk.
-struct relaxed {
+// in-ns capabilities) can't read them. The walk adds u+r(x) and restores
+// the mode afterwards, so it does modify the change set while it runs.
+// Guarantee: each entry is pushed *before* its chmod, popped after its
+// restore, and atexit restores whatever is still pushed if err() exits
+// mid-walk. TERM/HUP don't kill us while the walk runs (see jail.c).
+// Only SIGKILL can leave a mode relaxed.
+struct relax_entry {
   int dirfd;
   const char *name;
   mode_t mode;
-  struct relaxed *next;
+  struct relax_entry *next;
 };
-static struct relaxed *relaxed;
+static struct relax_entry *relaxed_head;
 
-static void restore_all(void) {
-  for (; relaxed; relaxed = relaxed->next)
-    if (fchmodat(relaxed->dirfd, relaxed->name, relaxed->mode, 0) < 0)
-      warn("restore mode of upper entry %s", relaxed->name);
+// Copies s to out, C-quoted if it holds any byte that could forge or hide
+// a line on a terminal or for a line parser: control bytes, space, '"',
+// '\', and non-ASCII (which includes bidi overrides). An unquoted path
+// therefore never contains a space, so the " (fifo)" and " -> target"
+// suffixes are unambiguous.
+static void quote(char out[QUOTE_MAX], const char *s) {
+  const unsigned char *p;
+
+  for (p = (const unsigned char *)s; *p; p++)
+    if (*p <= ' ' || *p >= 0x7f || *p == '"' || *p == '\\')
+      break;
+  if (!*p) {
+    strcpy(out, s);
+    return;
+  }
+  *out++ = '"';
+  for (p = (const unsigned char *)s; *p; p++) {
+    if (*p == '"' || *p == '\\') {
+      *out++ = '\\';
+      *out++ = *p;
+    } else if (*p < ' ' || *p >= 0x7f) {
+      out += sprintf(out, "\\%03o", *p);
+    } else {
+      *out++ = *p;
+    }
+  }
+  *out++ = '"';
+  *out = '\0';
 }
 
-static bool relax(struct relaxed *r, int dirfd, const char *name, mode_t mode,
-                  mode_t need) {
+// The current path, quoted, for error messages.
+static const char *where(void) {
+  static char buf[QUOTE_MAX];
+
+  quote(buf, path[0] ? path : ".");
+  return buf;
+}
+
+static void restore_all(void) {
+  for (; relaxed_head; relaxed_head = relaxed_head->next)
+    if (fchmodat(relaxed_head->dirfd, relaxed_head->name, relaxed_head->mode,
+                 AT_SYMLINK_NOFOLLOW) < 0)
+      warn("restore mode of an upper entry");
+}
+
+// AT_SYMLINK_NOFOLLOW: never chmod through a symlink. Only dirs and
+// regular files are relaxed, so this is defense in depth (glibc uses
+// fchmodat2, kernel >= 6.6).
+static bool relax(struct relax_entry *r, int dirfd, const char *name,
+                  mode_t mode, mode_t need) {
   if ((mode & need) == need)
     return false;
-  if (fchmodat(dirfd, name, (mode | need) & 07777, 0) < 0)
-    err(1, "chmod upper %s", path);
-  *r = (struct relaxed){dirfd, name, mode & 07777, relaxed};
-  relaxed = r;
+  *r = (struct relax_entry){dirfd, name, mode & ALLPERMS, relaxed_head};
+  relaxed_head = r;
+  if (fchmodat(dirfd, name, (mode | need) & ALLPERMS, AT_SYMLINK_NOFOLLOW) < 0)
+    err(1, "chmod upper %s", where());
   return true;
 }
 
-static void unrelax(void) {
-  struct relaxed *r = relaxed;
+static void restore(void) {
+  struct relax_entry *r = relaxed_head;
 
-  relaxed = r->next;
-  if (fchmodat(r->dirfd, r->name, r->mode, 0) < 0)
-    err(1, "restore mode of upper %s", path);
+  relaxed_head = r->next;
+  if (fchmodat(r->dirfd, r->name, r->mode, AT_SYMLINK_NOFOLLOW) < 0)
+    err(1, "restore mode of upper %s", where());
 }
 
 static size_t push(size_t len, const char *name) {
   size_t n = strlen(name);
   if (len + n + 2 > sizeof path)
-    errx(1, "path too long: %s%s", path, name);
+    errx(1, "path too long: %s", where());
   memcpy(path + len, name, n + 1);
   return len + n;
 }
@@ -82,14 +132,10 @@ static size_t descend(size_t len) {
   return len + 1;
 }
 
-static void emit(char tag, const char *suffix) {
-  printf("%c %s%s\n", tag, path, suffix);
-  if (tag == '?')
-    complete = false;
-}
-
-static const char *type_tag(mode_t mode) {
+static const char *type_suffix(mode_t mode) {
   switch (mode & S_IFMT) {
+  case S_IFLNK:
+    return " (symlink)";
   case S_IFIFO:
     return " (fifo)";
   case S_IFSOCK:
@@ -103,8 +149,48 @@ static const char *type_tag(mode_t mode) {
   }
 }
 
+// The one place a diff line is printed. mode gives the trailing '/' and the
+// type suffix (0 if unknown). For a symlink with a dirfd, the target is
+// shown instead of " (symlink)", so the reviewer sees where it points.
+static void emit(char tag, mode_t mode, int dirfd, const char *name) {
+  static char q[QUOTE_MAX];
+  size_t len = strlen(path);
+
+  if (len == 0) {
+    quote(q, "./");
+  } else if (S_ISDIR(mode)) {
+    path[len] = '/'; // push() left room
+    path[len + 1] = '\0';
+    quote(q, path);
+    path[len] = '\0';
+  } else {
+    quote(q, path);
+  }
+
+  if (S_ISLNK(mode) && dirfd >= 0) {
+    char target[PATH_MAX];
+    ssize_t n = readlinkat(dirfd, name, target, sizeof target);
+    if (n < 0)
+      err(1, "readlink upper %s", where());
+    if ((size_t)n == sizeof target)
+      errx(1, "symlink target too long: %s", where());
+    target[n] = '\0';
+    printf("%c %s -> ", tag, q);
+    quote(q, target);
+    printf("%s\n", q);
+  } else {
+    printf("%c %s%s\n", tag, q, type_suffix(mode));
+  }
+  if (tag == '?')
+    complete = false;
+}
+
 static bool is_whiteout(const struct stat *st) {
   return S_ISCHR(st->st_mode) && st->st_rdev == makedev(0, 0);
+}
+
+static bool mode_differs(const struct stat *a, const struct stat *b) {
+  return (a->st_mode ^ b->st_mode) & ALLPERMS;
 }
 
 // Never follows a symlink: a workspace symlink must not walk us out of
@@ -117,24 +203,24 @@ static int open_lower_dir(int lfd, const char *name) {
   int fd = open_dir(lfd, name);
   if (fd < 0) {
     if (errno != EACCES)
-      err(1, "open workspace %s", path);
-    return LOWER_UNKNOWN;
+      err(1, "open workspace %s", where());
+    return LOWER_UNREADABLE;
   }
   return fd;
 }
 
 static enum lookup lookup(int lfd, const char *name, struct stat *st) {
   if (lfd == LOWER_NONE)
-    return ABSENT;
-  if (lfd == LOWER_UNKNOWN)
-    return UNKNOWN;
+    return LOOKUP_ABSENT;
+  if (lfd == LOWER_UNREADABLE)
+    return LOOKUP_UNREADABLE;
   if (fstatat(lfd, name, st, AT_SYMLINK_NOFOLLOW) == 0)
-    return PRESENT;
+    return LOOKUP_PRESENT;
   if (errno == ENOENT)
-    return ABSENT;
+    return LOOKUP_ABSENT;
   if (errno == EACCES)
-    return UNKNOWN;
-  err(1, "stat workspace %s", path);
+    return LOOKUP_UNREADABLE;
+  err(1, "stat workspace %s", where());
 }
 
 // Overlay stops lower lookups below a dir marked opaque (it was deleted
@@ -145,7 +231,7 @@ static bool is_opaque(int fd) {
   if (n < 0) {
     if (errno == ENODATA || errno == ERANGE)
       return false;
-    err(1, "getxattr upper %s", path);
+    err(1, "getxattr upper %s", where());
   }
   return n == 1 && v[0] == 'y';
 }
@@ -159,10 +245,10 @@ static int by_name(const struct dirent **a, const struct dirent **b) {
   return strcmp((*a)->d_name, (*b)->d_name);
 }
 
-static int list(int fd, struct dirent ***ents) {
+static int list(int fd, const char *side, struct dirent ***ents) {
   int n = scandirat(fd, ".", ents, skip_dots, by_name);
   if (n < 0)
-    err(1, "scandir %s", path);
+    err(1, "scandir %s %s", side, where());
   return n;
 }
 
@@ -172,47 +258,44 @@ static void free_list(struct dirent **ents, int n) {
   free(ents);
 }
 
-static void gone(int lfd, const char *name, const struct stat *st, size_t len);
+static void gone_name(int lfd, const char *name, size_t len);
 
-// Every entry below lower dir `name` is gone from the merged view.
+// Every entry below lower dir `name` (path[0..len)) is gone from the
+// merged view.
 static void gone_children(int lfd, const char *name, size_t len) {
   struct dirent **ents;
-  struct stat st;
 
   int fd = open_lower_dir(lfd, name);
-  if (fd == LOWER_UNKNOWN) {
-    emit('?', "/");
+  if (fd == LOWER_UNREADABLE) {
+    emit('?', S_IFDIR, -1, name);
     return;
   }
   size_t sub = descend(len);
-  int n = list(fd, &ents);
-  for (int i = 0; i < n; i++) {
-    size_t l = push(sub, ents[i]->d_name);
-    if (fstatat(fd, ents[i]->d_name, &st, AT_SYMLINK_NOFOLLOW) < 0) {
-      if (errno != EACCES)
-        err(1, "stat workspace %s", path);
-      emit('?', "");
-      continue;
-    }
-    gone(fd, ents[i]->d_name, &st, l);
-  }
+  int n = list(fd, "workspace", &ents);
+  for (int i = 0; i < n; i++)
+    gone_name(fd, ents[i]->d_name, push(sub, ents[i]->d_name));
   path[len] = '\0';
   free_list(ents, n);
   if (close(fd) < 0)
-    err(1, "close");
+    err(1, "close workspace %s", where());
 }
 
 // Lower entry `name` (path[0..len)) is gone from the merged view.
-static void gone(int lfd, const char *name, const struct stat *st, size_t len) {
-  if (!S_ISDIR(st->st_mode)) {
-    emit('D', type_tag(st->st_mode));
+static void gone_name(int lfd, const char *name, size_t len) {
+  struct stat st;
+
+  if (fstatat(lfd, name, &st, AT_SYMLINK_NOFOLLOW) < 0) {
+    if (errno != EACCES)
+      err(1, "stat workspace %s", where());
+    emit('?', 0, -1, name);
     return;
   }
-  emit('D', "/");
-  gone_children(lfd, name, len);
+  emit('D', st.st_mode, -1, name);
+  if (S_ISDIR(st.st_mode))
+    gone_children(lfd, name, len);
 }
 
-static ssize_t read_full(int fd, char *buf, size_t n) {
+static size_t read_full(int fd, char *buf, size_t n) {
   size_t got = 0;
 
   while (got < n) {
@@ -220,7 +303,7 @@ static ssize_t read_full(int fd, char *buf, size_t n) {
     if (r < 0) {
       if (errno == EINTR)
         continue;
-      err(1, "read %s", path);
+      err(1, "read %s", where());
     }
     if (r == 0)
       break;
@@ -233,8 +316,8 @@ static bool same_bytes(int a, int b) {
   static char ba[1 << 16], bb[1 << 16];
 
   for (;;) {
-    ssize_t na = read_full(a, ba, sizeof ba);
-    ssize_t nb = read_full(b, bb, sizeof bb);
+    size_t na = read_full(a, ba, sizeof ba);
+    size_t nb = read_full(b, bb, sizeof bb);
     if (na != nb || memcmp(ba, bb, na) != 0)
       return false;
     if (na == 0)
@@ -244,120 +327,120 @@ static bool same_bytes(int a, int b) {
 
 // Same-type, non-dir entries. Equal content and mode is not a change:
 // overlay copies a file up on any open for writing, even with no write.
-static enum cmp differs(int ufd, int lfd, const char *name,
+static enum cmp compare(int ufd, int lfd, const char *name,
                         const struct stat *u, const struct stat *l) {
   if (S_ISLNK(u->st_mode)) {
     char a[PATH_MAX], b[PATH_MAX];
     ssize_t na = readlinkat(ufd, name, a, sizeof a);
     if (na < 0)
-      err(1, "readlink upper %s", path);
+      err(1, "readlink upper %s", where());
     ssize_t nb = readlinkat(lfd, name, b, sizeof b);
     if (nb < 0)
-      err(1, "readlink workspace %s", path);
-    return na != nb || memcmp(a, b, na) != 0 ? CHANGED : SAME;
+      err(1, "readlink workspace %s", where());
+    return na != nb || memcmp(a, b, na) != 0 ? CMP_CHANGED : CMP_SAME;
   }
-  if ((u->st_mode ^ l->st_mode) & 07777)
-    return CHANGED;
+  if (mode_differs(u, l))
+    return CMP_CHANGED;
   if (S_ISCHR(u->st_mode) || S_ISBLK(u->st_mode))
-    return u->st_rdev != l->st_rdev ? CHANGED : SAME;
+    return u->st_rdev != l->st_rdev ? CMP_CHANGED : CMP_SAME;
   if (!S_ISREG(u->st_mode))
-    return SAME;
+    return CMP_SAME;
   if (u->st_size != l->st_size)
-    return CHANGED;
+    return CMP_CHANGED;
 
   int lf = openat(lfd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
   if (lf < 0) {
     if (errno != EACCES)
-      err(1, "open workspace %s", path);
-    return UNREADABLE;
+      err(1, "open workspace %s", where());
+    return CMP_UNREADABLE;
   }
-  struct relaxed r;
-  bool relaxed_here = relax(&r, ufd, name, u->st_mode, S_IRUSR);
+  struct relax_entry r;
+  bool relaxed = relax(&r, ufd, name, u->st_mode, S_IRUSR);
   int uf = openat(ufd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
   if (uf < 0)
-    err(1, "open upper %s", path);
+    err(1, "open upper %s", where());
   bool same = same_bytes(uf, lf);
   if (close(uf) < 0 || close(lf) < 0)
-    err(1, "close");
-  if (relaxed_here)
-    unrelax();
-  return same ? SAME : CHANGED;
+    err(1, "close %s", where());
+  if (relaxed)
+    restore();
+  return same ? CMP_SAME : CMP_CHANGED;
 }
 
 static void walk(int ufd, int lfd, bool opaque, size_t len);
 
 // Upper dir `name` (path[0..len)), walked against lower dir fd lfd or a
 // LOWER_* sentinel. Takes ownership of lfd.
-static void dir(int ufd, const char *name, mode_t mode, int lfd, bool opaque,
-                size_t len) {
-  struct relaxed r;
-  bool relaxed_here = relax(&r, ufd, name, mode, S_IRUSR | S_IXUSR);
+static void walk_dir(int ufd, const char *name, mode_t mode, int lfd,
+                     bool opaque, size_t len) {
+  struct relax_entry r;
+  bool relaxed = relax(&r, ufd, name, mode, S_IRUSR | S_IXUSR);
 
   int fd = open_dir(ufd, name);
   if (fd < 0)
-    err(1, "open upper %s", path);
+    err(1, "open upper %s", where());
   walk(fd, lfd, opaque || is_opaque(fd), descend(len));
   path[len] = '\0';
   if (close(fd) < 0 || (lfd >= 0 && close(lfd) < 0))
-    err(1, "close");
-  if (relaxed_here)
-    unrelax();
+    err(1, "close %s", where());
+  if (relaxed)
+    restore();
 }
 
 // One upper entry `name` (path[0..len)) of a dir whose lower side is lfd.
-static void entry(int ufd, int lfd, bool opaque, const char *name, size_t len) {
+static void walk_entry(int ufd, int lfd, bool opaque, const char *name,
+                       size_t len) {
   struct stat u, l;
 
   if (fstatat(ufd, name, &u, AT_SYMLINK_NOFOLLOW) < 0)
-    err(1, "stat upper %s", path);
-  enum lookup lower = lookup(lfd, name, &l);
+    err(1, "stat upper %s", where());
+  enum lookup found = lookup(lfd, name, &l);
 
   if (is_whiteout(&u)) {
-    if (lower == PRESENT)
-      gone(lfd, name, &l, len);
-    else if (lower == UNKNOWN)
-      emit('?', "");
+    if (found == LOOKUP_PRESENT)
+      gone_name(lfd, name, len);
+    else if (found == LOOKUP_UNREADABLE)
+      emit('?', 0, -1, name);
     return;
   }
 
   if (S_ISDIR(u.st_mode)) {
     int sub = LOWER_NONE;
-    if (lower == ABSENT) {
-      emit('A', "/");
-    } else if (lower == UNKNOWN) {
-      emit('?', "/");
-      sub = LOWER_UNKNOWN;
+    if (found == LOOKUP_ABSENT) {
+      emit('A', u.st_mode, ufd, name);
+    } else if (found == LOOKUP_UNREADABLE) {
+      emit('?', u.st_mode, ufd, name);
+      sub = LOWER_UNREADABLE;
     } else if (!S_ISDIR(l.st_mode)) {
-      emit('M', "/"); // type change: lower non-dir replaced by a dir
+      emit('M', u.st_mode, ufd, name); // type change: non-dir became a dir
     } else {
-      if ((u.st_mode ^ l.st_mode) & 07777)
-        emit('M', "/");
+      if (mode_differs(&u, &l))
+        emit('M', u.st_mode, ufd, name);
       sub = open_lower_dir(lfd, name);
-      if (sub == LOWER_UNKNOWN)
-        emit('?', "/");
+      if (sub == LOWER_UNREADABLE)
+        emit('?', u.st_mode, ufd, name);
     }
-    dir(ufd, name, u.st_mode, sub, opaque, len);
+    walk_dir(ufd, name, u.st_mode, sub, opaque, len);
     return;
   }
 
-  const char *tag = type_tag(u.st_mode);
-  if (lower == ABSENT) {
-    emit('A', tag);
-  } else if (lower == UNKNOWN) {
-    emit('?', tag);
+  if (found == LOOKUP_ABSENT) {
+    emit('A', u.st_mode, ufd, name);
+  } else if (found == LOOKUP_UNREADABLE) {
+    emit('?', u.st_mode, ufd, name);
   } else if ((u.st_mode ^ l.st_mode) & S_IFMT) {
-    emit('M', tag); // type change
+    emit('M', u.st_mode, ufd, name); // type change
     if (S_ISDIR(l.st_mode))
       gone_children(lfd, name, len);
   } else {
-    switch (differs(ufd, lfd, name, &u, &l)) {
-    case CHANGED:
-      emit('M', tag);
+    switch (compare(ufd, lfd, name, &u, &l)) {
+    case CMP_CHANGED:
+      emit('M', u.st_mode, ufd, name);
       break;
-    case UNREADABLE:
-      emit('?', tag);
+    case CMP_UNREADABLE:
+      emit('?', u.st_mode, ufd, name);
       break;
-    case SAME:
+    case CMP_SAME:
       break;
     }
   }
@@ -367,29 +450,21 @@ static void entry(int ufd, int lfd, bool opaque, const char *name, size_t len) {
 // opaque dir, lower entries with no upper counterpart are also deletions.
 static void walk(int ufd, int lfd, bool opaque, size_t len) {
   struct dirent **u, **l = nullptr;
-  int nu = list(ufd, &u), nl = 0;
+  int nu = list(ufd, "upper", &u), nl = 0;
 
   if (opaque && lfd >= 0)
-    nl = list(lfd, &l);
+    nl = list(lfd, "workspace", &l);
   for (int i = 0, j = 0; i < nu || j < nl;) {
     int c = i == nu ? 1 : j == nl ? -1 : strcmp(u[i]->d_name, l[j]->d_name);
     if (c > 0) {
       const char *name = l[j++]->d_name;
-      size_t n = push(len, name);
-      struct stat st;
-      if (fstatat(lfd, name, &st, AT_SYMLINK_NOFOLLOW) < 0) {
-        if (errno != EACCES)
-          err(1, "stat workspace %s", path);
-        emit('?', "");
-        continue;
-      }
-      gone(lfd, name, &st, n);
+      gone_name(lfd, name, push(len, name));
       continue;
     }
     if (c == 0)
       j++;
     const char *name = u[i++]->d_name;
-    entry(ufd, lfd, opaque, name, push(len, name));
+    walk_entry(ufd, lfd, opaque, name, push(len, name));
   }
   path[len] = '\0';
   free_list(u, nu);
@@ -397,38 +472,34 @@ static void walk(int ufd, int lfd, bool opaque, size_t len) {
     free_list(l, nl);
 }
 
-bool diff_print(const char *upper, const char *ws) {
-  char parent[PATH_MAX];
-  struct stat st;
+bool diff_print(const struct run *run, const char *ws) {
+  struct stat u, l;
 
   if (atexit(restore_all) != 0)
     errx(1, "atexit");
 
-  // Open upper via its parent so a chmod'ed upper root can be relaxed too.
-  // The root's own mode is not compared: we created upper, so it never
-  // matches the workspace root.
-  const char *slash = strrchr(upper, '/');
-  if (!slash || slash == upper || (size_t)(slash - upper) >= sizeof parent)
-    errx(1, "bad upper dir path: %s", upper);
-  memcpy(parent, upper, slash - upper);
-  parent[slash - upper] = '\0';
-  int pfd = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  // Open upper via the run dir so a chmod'ed upper root can be relaxed.
+  int pfd = open(run->dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   if (pfd < 0)
-    err(1, "open %s", parent);
-  if (fstatat(pfd, slash + 1, &st, AT_SYMLINK_NOFOLLOW) < 0)
-    err(1, "stat %s", upper);
+    err(1, "open %s", run->dir);
+  if (fstatat(pfd, "upper", &u, AT_SYMLINK_NOFOLLOW) < 0)
+    err(1, "stat %s", run->upper);
 
-  int lfd = open(ws, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-  if (lfd < 0) {
-    if (errno != EACCES)
-      err(1, "open %s", ws);
-    lfd = LOWER_UNKNOWN;
-    emit('?', "./");
+  // overlay_prepare gave upper the workspace root's mode, so a difference
+  // here is the agent's chmod of the root.
+  int lfd = open_lower_dir(AT_FDCWD, ws);
+  if (lfd == LOWER_UNREADABLE) {
+    emit('?', S_IFDIR, -1, nullptr);
+  } else {
+    if (fstat(lfd, &l) < 0)
+      err(1, "stat %s", ws);
+    if (mode_differs(&u, &l))
+      emit('M', S_IFDIR, -1, nullptr);
   }
-  dir(pfd, slash + 1, st.st_mode, lfd, false, 0);
+  walk_dir(pfd, "upper", u.st_mode, lfd, false, 0);
   if (close(pfd) < 0)
-    err(1, "close");
+    err(1, "close %s", run->dir);
   if (fflush(stdout) == EOF)
-    err(1, "stdout");
+    err(1, "fflush stdout");
   return complete;
 }
