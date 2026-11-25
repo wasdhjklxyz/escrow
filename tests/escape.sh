@@ -124,9 +124,14 @@ else
   echo "skip tty: no script(1) on the host"
 fi
 
-if ! escrow --net --workspace "$ws" --state "$state" -- true \
-  >/dev/null 2>"$tmp/net.err"; then
-  echo "skip --net cases: $(grep -v 'run dir' "$tmp/net.err" | head -n1)"
+st=0
+escrow --net --workspace "$ws" --state "$state" -- true \
+  >/dev/null 2>"$tmp/net.err" || st=$?
+if grep -q 'needs Landlock ABI' "$tmp/net.err"; then
+  echo "skip --net cases: $(grep 'needs Landlock ABI' "$tmp/net.err")"
+elif [ "$st" -ne 0 ]; then
+  echo "FAIL --net setup (exit $st): $(grep -v 'run dir' "$tmp/net.err" | head -n1)"
+  fails=$((fails + 1))
 else
   if [ -n "$listener" ]; then
     run net_443 --net -- "$port"
