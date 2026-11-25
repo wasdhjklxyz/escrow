@@ -5,12 +5,15 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/xattr.h>
 #include <unistd.h>
+
+static volatile sig_atomic_t interrupted;
 
 struct walk {
   FILE *out;
@@ -76,24 +79,64 @@ static int open_dir(int dfd, const char *name, const struct walk *w) {
   return fd;
 }
 
+/* Lower (workspace) dir; we may not chmod it. If the host user can't read
+ * it, mark it "?" (contents not compared) and return -1 instead of dying:
+ * the agent could enter it via CAP_DAC_OVERRIDE in its userns. */
+static int open_lower_dir(int dfd, const char *name, struct walk *w) {
+  int fd = openat(dfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd >= 0)
+    return fd;
+  if (errno != EACCES)
+    err(1, "open %s", w->path);
+  warn("workspace dir %s not compared", w->path);
+  emit(w, '?', S_IFDIR);
+  return -1;
+}
+
 /*
  * Upper entries belong to our uid, but the agent had CAP_DAC_OVERRIDE in its
  * userns and we don't: a dir it chmod'ed 000 would abort the walk. Add u+rx
- * for the walk; close_upper_dir restores the mode the agent left.
+ * for the walk, then restore the agent's mode. Relaxed dirs are always
+ * ancestors of the walk position, so they form a stack; restore_relaxed()
+ * also runs at exit, so an err() mid-walk never leaves upper altered.
  */
-static int open_upper_dir(int dfd, const char *name, mode_t mode, int *relaxed,
+static struct {
+  int dfd;
+  const char *name; /* owned by the enclosing dir's listing (or caller) */
+  mode_t mode;
+} relaxed[PATH_MAX / 2 + 1];
+static size_t n_relaxed;
+
+static void restore_relaxed(void) {
+  while (n_relaxed > 0) {
+    n_relaxed--;
+    if (fchmodat(relaxed[n_relaxed].dfd, relaxed[n_relaxed].name,
+                 relaxed[n_relaxed].mode, AT_SYMLINK_NOFOLLOW) < 0)
+      warn("restore mode of %s in upper", relaxed[n_relaxed].name);
+  }
+}
+
+static int open_upper_dir(int dfd, const char *name, mode_t mode,
                           const struct walk *w) {
   mode_t perm = mode & 07777;
-  *relaxed = (perm & (S_IRUSR | S_IXUSR)) != (S_IRUSR | S_IXUSR);
-  if (*relaxed && fchmodat(dfd, name, perm | S_IRUSR | S_IXUSR, 0) < 0)
+  if ((perm & (S_IRUSR | S_IXUSR)) == (S_IRUSR | S_IXUSR))
+    return open_dir(dfd, name, w);
+  if (n_relaxed == sizeof relaxed / sizeof *relaxed)
+    errx(1, "too deep: %s", w->path);
+  /* Recorded before the chmod, so a failure anywhere after is restored. */
+  relaxed[n_relaxed++] = (typeof(*relaxed)){dfd, name, perm};
+  if (fchmodat(dfd, name, perm | S_IRUSR | S_IXUSR, AT_SYMLINK_NOFOLLOW) < 0)
     err(1, "chmod u+rx %s", w->len ? w->path : name);
   return open_dir(dfd, name, w);
 }
 
-static void close_upper_dir(int fd, mode_t mode, int relaxed,
-                            const struct walk *w) {
-  if (relaxed && fchmod(fd, mode & 07777) < 0)
-    err(1, "restore mode %s", w->path);
+static void close_upper_dir(int fd, mode_t mode, const struct walk *w) {
+  mode_t perm = mode & 07777;
+  if ((perm & (S_IRUSR | S_IXUSR)) != (S_IRUSR | S_IXUSR)) {
+    if (fchmod(fd, perm) < 0)
+      err(1, "restore mode %s", w->path);
+    n_relaxed--;
+  }
   xclose(fd);
 }
 
@@ -155,8 +198,9 @@ static void deleted_tree(struct walk *w, int fd) {
     struct stat st;
     if (lstat_at(fd, names[i]->d_name, &st, w)) {
       emit(w, 'D', st.st_mode);
-      if (S_ISDIR(st.st_mode)) {
-        int sub = open_dir(fd, names[i]->d_name, w);
+      int sub;
+      if (S_ISDIR(st.st_mode) &&
+          (sub = open_lower_dir(fd, names[i]->d_name, w)) >= 0) {
         deleted_tree(w, sub);
         xclose(sub);
       }
@@ -169,8 +213,8 @@ static void deleted_tree(struct walk *w, int fd) {
 static void deleted(struct walk *w, int lfd, const char *name,
                     const struct stat *ls) {
   emit(w, 'D', ls->st_mode);
-  if (S_ISDIR(ls->st_mode)) {
-    int sub = open_dir(lfd, name, w);
+  int sub;
+  if (S_ISDIR(ls->st_mode) && (sub = open_lower_dir(lfd, name, w)) >= 0) {
     deleted_tree(w, sub);
     xclose(sub);
   }
@@ -268,20 +312,23 @@ static void walk_entry(struct walk *w, int ufd, int lfd, int opaque,
     if (has_lower)
       deleted(w, lfd, name, &ls);
   } else if (S_ISDIR(us.st_mode)) {
-    int relaxed;
-    int sub = open_upper_dir(ufd, name, us.st_mode, &relaxed, w);
+    int sub = open_upper_dir(ufd, name, us.st_mode, w);
     int sub_opaque = opaque || is_opaque(sub, w);
     if (has_lower && S_ISDIR(ls.st_mode)) {
-      int lsub = open_dir(lfd, name, w);
-      walk_dir(w, sub, lsub, sub_opaque);
-      xclose(lsub);
+      if (us.st_mode != ls.st_mode)
+        emit(w, 'M', us.st_mode);
+      /* Unreadable lower: already marked "?", entries below show as A. */
+      int lsub = open_lower_dir(lfd, name, w);
+      walk_dir(w, sub, lsub, lsub >= 0 && sub_opaque);
+      if (lsub >= 0)
+        xclose(lsub);
     } else {
       if (has_lower)
         deleted(w, lfd, name, &ls);
       emit(w, 'A', us.st_mode);
       walk_dir(w, sub, -1, 0);
     }
-    close_upper_dir(sub, us.st_mode, relaxed, w);
+    close_upper_dir(sub, us.st_mode, w);
   } else if (!has_lower) {
     emit(w, 'A', us.st_mode);
   } else if (S_ISDIR(ls.st_mode)) {
@@ -305,6 +352,8 @@ static void walk_dir(struct walk *w, int ufd, int lfd, int opaque) {
     nl = list_dir(lfd, &ln, w);
 
   for (int i = 0, j = 0; i < nu || j < nl;) {
+    if (interrupted)
+      errx(1, "interrupted; upper modes restored");
     int c = i >= nu ? 1 : j >= nl ? -1 : strcmp(un[i]->d_name, ln[j]->d_name);
     const char *name = c <= 0 ? un[i]->d_name : ln[j]->d_name;
     size_t old = push(w, name);
@@ -324,19 +373,37 @@ static void walk_dir(struct walk *w, int ufd, int lfd, int opaque) {
     free_list(ln, nl);
 }
 
+static void on_signal(int sig) {
+  (void)sig;
+  interrupted = 1;
+}
+
 void diff_print(const char *upper, const char *lower, FILE *out) {
   struct walk w = {.out = out};
-  /* The agent can chmod the workspace root too; that copies up to upper. */
+
+  /* Relaxed upper modes must be restored however the walk ends: err() goes
+   * through exit() -> atexit; signals set a flag the walk checks. SIGKILL
+   * can't be caught. */
+  if (atexit(restore_relaxed) != 0)
+    errx(1, "atexit");
+  struct sigaction sa = {.sa_handler = on_signal};
+  if (sigemptyset(&sa.sa_mask) < 0)
+    err(1, "sigemptyset");
+  const int sigs[] = {SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+  for (size_t i = 0; i < sizeof sigs / sizeof *sigs; i++)
+    if (sigaction(sigs[i], &sa, NULL) < 0)
+      err(1, "sigaction %d", sigs[i]);
+
+  /* chmod on the merged root lands on the upper root. */
   struct stat us;
   if (lstat(upper, &us) < 0)
     err(1, "stat %s", upper);
-  int relaxed;
-  int ufd = open_upper_dir(AT_FDCWD, upper, us.st_mode, &relaxed, &w);
+  int ufd = open_upper_dir(AT_FDCWD, upper, us.st_mode, &w);
   int lfd = open(lower, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
   if (lfd < 0)
     err(1, "open %s", lower);
   walk_dir(&w, ufd, lfd, 0);
-  close_upper_dir(ufd, us.st_mode, relaxed, &w);
+  close_upper_dir(ufd, us.st_mode, &w);
   xclose(lfd);
   if (fflush(out) == EOF)
     err(1, "write diff");
