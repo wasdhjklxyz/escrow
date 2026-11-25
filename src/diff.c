@@ -1,5 +1,6 @@
 #include "diff.h"
 
+#include "changes.h"
 #include "overlay.h"
 
 #include <dirent.h>
@@ -36,6 +37,8 @@ enum { XATTR_BUF = 1 << 16 };
 // push(), and a directory's prefix ends in '/'.
 static char path[PATH_MAX];
 static bool complete = true;
+// If set, every diff line also goes into the change set.
+static struct changes_writer *changes;
 
 // The agent may chmod upper entries so we (the same uid, without its
 // in-ns capabilities) can't read them. The walk adds u+r(x) and restores
@@ -256,6 +259,8 @@ static void emit(char tag, mode_t mode, int dirfd, const char *name, int xfd) {
   putchar('\n');
   if (tag == '?')
     complete = false;
+  if (changes)
+    changes_emit(changes, tag, mode, path, dirfd, name, xfd);
 }
 
 static bool is_whiteout(const struct stat *st) {
@@ -572,8 +577,11 @@ static void walk(int ufd, int lfd, bool opaque, size_t len) {
     free_list(l, nl);
 }
 
-bool diff_print(const struct run *run, const char *ws) {
+bool diff_print(const struct run *run, const char *ws,
+                struct changes_writer *w) {
   struct stat u, l;
+
+  changes = w;
 
   if (atexit(restore_all) != 0)
     errx(1, "atexit");
