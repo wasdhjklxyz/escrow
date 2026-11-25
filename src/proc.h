@@ -2,6 +2,7 @@
 #define ESCROW_PROC_H
 
 #include <stddef.h>
+#include <stdio.h>
 #include <sys/types.h>
 
 // Host-side helper processes. escrow implements no crypto: SHA-256 is
@@ -13,9 +14,21 @@
 // status (0..255), or 128+N if killed by signal N. Exits with status 1 if
 // it can't be spawned.
 int run_cmd(char *const argv[], int in_fd, int out_fd);
+// Same, with stderr to err_fd (-1: inherit).
+int run_cmd_err(char *const argv[], int in_fd, int out_fd, int err_fd);
 
 // write(2) until all n bytes are out (EINTR retried). 0 or -1.
 int write_all(int fd, const void *buf, size_t n);
+
+// Copies in to stdout so untrusted text can't drive the terminal: control
+// bytes (but \t and \n) and anything >= 0x7f (UTF-8, bidi overrides)
+// become \ooo.
+void print_escaped(FILE *in);
+
+// rm -rf a tree escrow made (a stage, a materialized proposal). Its dirs
+// may be 0555 (a signed mode), so u+rwx goes back first; chmod -R doesn't
+// follow the symlinks it meets. Warns on failure, never exits.
+void remove_dir(const char *path);
 
 // A running sha256sum fed through a pipe.
 struct sha256 {
