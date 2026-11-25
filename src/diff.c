@@ -28,6 +28,10 @@ enum cmp { CMP_SAME, CMP_CHANGED, CMP_UNREADABLE };
 // Worst case for quote(): every byte becomes \ooo, plus quotes and NUL.
 enum { QUOTE_MAX = 4 * PATH_MAX + 3 };
 
+// Kernel cap on one xattr value and on a name list (XATTR_SIZE_MAX,
+// XATTR_LIST_MAX).
+enum { XATTR_BUF = 1 << 16 };
+
 // Relative path of the entry being visited. Every name is appended with
 // push(), and a directory's prefix ends in '/'.
 static char path[PATH_MAX];
@@ -149,10 +153,75 @@ static const char *type_suffix(mode_t mode) {
   }
 }
 
+// Overlay's own bookkeeping (opaque, origin, impure, ...), not the agent's.
+static bool is_overlay_xattr(const char *name) {
+  return strncmp(name, "user.overlay.", 13) == 0 ||
+         strncmp(name, "trusted.overlay.", 16) == 0;
+}
+
+static ssize_t list_xattrs(int fd, char buf[XATTR_BUF]) {
+  ssize_t n = flistxattr(fd, buf, XATTR_BUF);
+  if (n < 0) {
+    if (errno == ENOTSUP)
+      return 0;
+    err(1, "listxattr %s", where());
+  }
+  return n;
+}
+
+// True if b lacks one of a's non-overlay xattrs (names in alist) or holds
+// it with a different value.
+static bool xattrs_missing(int a, int b, const char *alist, ssize_t n) {
+  static char va[XATTR_BUF], vb[XATTR_BUF];
+
+  for (const char *p = alist; p < alist + n; p += strlen(p) + 1) {
+    if (is_overlay_xattr(p))
+      continue;
+    ssize_t na = fgetxattr(a, p, va, sizeof va);
+    if (na < 0)
+      err(1, "getxattr %s", where());
+    ssize_t nb = fgetxattr(b, p, vb, sizeof vb);
+    if (nb < 0) {
+      if (errno == ENODATA)
+        return true;
+      err(1, "getxattr %s", where());
+    }
+    if (na != nb || memcmp(va, vb, na) != 0)
+      return true;
+  }
+  return false;
+}
+
+// Agent-set xattrs (security.capability above all) change what a file can
+// do without touching its bytes or mode, so they count as a modification.
+static bool xattrs_differ(int ufd, int lfd) {
+  static char ul[XATTR_BUF], ll[XATTR_BUF];
+  ssize_t un = list_xattrs(ufd, ul), ln = list_xattrs(lfd, ll);
+
+  return xattrs_missing(ufd, lfd, ul, un) || xattrs_missing(lfd, ufd, ll, ln);
+}
+
+// Appends " xattrs: <name>..." for the non-overlay xattrs on fd, so an
+// added or modified entry shows what metadata it carries.
+static void print_xattrs(int fd) {
+  static char names[XATTR_BUF], q[QUOTE_MAX];
+  ssize_t n = list_xattrs(fd, names);
+  bool first = true;
+
+  for (const char *p = names; p < names + n; p += strlen(p) + 1) {
+    if (is_overlay_xattr(p))
+      continue;
+    quote(q, p);
+    printf("%s%s", first ? " xattrs: " : " ", q);
+    first = false;
+  }
+}
+
 // The one place a diff line is printed. mode gives the trailing '/' and the
 // type suffix (0 if unknown). For a symlink with a dirfd, the target is
 // shown instead of " (symlink)", so the reviewer sees where it points.
-static void emit(char tag, mode_t mode, int dirfd, const char *name) {
+// xfd, if >= 0, is the open upper entry whose xattrs are listed.
+static void emit(char tag, mode_t mode, int dirfd, const char *name, int xfd) {
   static char q[QUOTE_MAX];
   size_t len = strlen(path);
 
@@ -177,10 +246,13 @@ static void emit(char tag, mode_t mode, int dirfd, const char *name) {
     target[n] = '\0';
     printf("%c %s -> ", tag, q);
     quote(q, target);
-    printf("%s\n", q);
+    printf("%s", q);
   } else {
-    printf("%c %s%s\n", tag, q, type_suffix(mode));
+    printf("%c %s%s", tag, q, type_suffix(mode));
   }
+  if (xfd >= 0)
+    print_xattrs(xfd);
+  putchar('\n');
   if (tag == '?')
     complete = false;
 }
@@ -267,7 +339,7 @@ static void gone_children(int lfd, const char *name, size_t len) {
 
   int fd = open_lower_dir(lfd, name);
   if (fd == LOWER_UNREADABLE) {
-    emit('?', S_IFDIR, -1, name);
+    emit('?', S_IFDIR, -1, name, -1);
     return;
   }
   size_t sub = descend(len);
@@ -287,10 +359,10 @@ static void gone_name(int lfd, const char *name, size_t len) {
   if (fstatat(lfd, name, &st, AT_SYMLINK_NOFOLLOW) < 0) {
     if (errno != EACCES)
       err(1, "stat workspace %s", where());
-    emit('?', 0, -1, name);
+    emit('?', 0, -1, name, -1);
     return;
   }
-  emit('D', st.st_mode, -1, name);
+  emit('D', st.st_mode, -1, name, -1);
   if (S_ISDIR(st.st_mode))
     gone_children(lfd, name, len);
 }
@@ -359,7 +431,7 @@ static enum cmp compare(int ufd, int lfd, const char *name,
   int uf = openat(ufd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
   if (uf < 0)
     err(1, "open upper %s", where());
-  bool same = same_bytes(uf, lf);
+  bool same = same_bytes(uf, lf) && !xattrs_differ(uf, lf);
   if (close(uf) < 0 || close(lf) < 0)
     err(1, "close %s", where());
   if (relaxed)
@@ -370,8 +442,9 @@ static enum cmp compare(int ufd, int lfd, const char *name,
 static void walk(int ufd, int lfd, bool opaque, size_t len);
 
 // Upper dir `name` (path[0..len)), walked against lower dir fd lfd or a
-// LOWER_* sentinel. Takes ownership of lfd.
-static void walk_dir(int ufd, const char *name, mode_t mode, int lfd,
+// LOWER_* sentinel. Takes ownership of lfd. Prints the dir's own line with
+// `tag` first. tag 0 means the dir is unchanged unless its xattrs differ.
+static void walk_dir(int ufd, const char *name, mode_t mode, int lfd, char tag,
                      bool opaque, size_t len) {
   struct relax_entry r;
   bool relaxed = relax(&r, ufd, name, mode, S_IRUSR | S_IXUSR);
@@ -379,9 +452,34 @@ static void walk_dir(int ufd, const char *name, mode_t mode, int lfd,
   int fd = open_dir(ufd, name);
   if (fd < 0)
     err(1, "open upper %s", where());
+  if (!tag && lfd >= 0 && xattrs_differ(fd, lfd))
+    tag = 'M';
+  if (tag)
+    emit(tag, S_IFDIR, -1, name, fd);
   walk(fd, lfd, opaque || is_opaque(fd), descend(len));
   path[len] = '\0';
   if (close(fd) < 0 || (lfd >= 0 && close(lfd) < 0))
+    err(1, "close %s", where());
+  if (relaxed)
+    restore();
+}
+
+// Prints the line for upper non-dir entry `name`. A regular file is opened
+// (relaxed if locked) so its xattrs can be listed. Other types aren't
+// opened: a fifo open would block.
+static void emit_upper(char tag, int ufd, const char *name,
+                       const struct stat *u) {
+  if (!S_ISREG(u->st_mode)) {
+    emit(tag, u->st_mode, ufd, name, -1);
+    return;
+  }
+  struct relax_entry r;
+  bool relaxed = relax(&r, ufd, name, u->st_mode, S_IRUSR);
+  int fd = openat(ufd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0)
+    err(1, "open upper %s", where());
+  emit(tag, u->st_mode, ufd, name, fd);
+  if (close(fd) < 0)
     err(1, "close %s", where());
   if (relaxed)
     restore();
@@ -400,45 +498,46 @@ static void walk_entry(int ufd, int lfd, bool opaque, const char *name,
     if (found == LOOKUP_PRESENT)
       gone_name(lfd, name, len);
     else if (found == LOOKUP_UNREADABLE)
-      emit('?', 0, -1, name);
+      emit('?', 0, -1, name, -1);
     return;
   }
 
   if (S_ISDIR(u.st_mode)) {
     int sub = LOWER_NONE;
+    char tag = 0;
     if (found == LOOKUP_ABSENT) {
-      emit('A', u.st_mode, ufd, name);
+      tag = 'A';
     } else if (found == LOOKUP_UNREADABLE) {
-      emit('?', u.st_mode, ufd, name);
+      tag = '?';
       sub = LOWER_UNREADABLE;
     } else if (!S_ISDIR(l.st_mode)) {
-      emit('M', u.st_mode, ufd, name); // type change: non-dir became a dir
+      tag = 'M'; // type change: non-dir became a dir
     } else {
-      if (mode_differs(&u, &l))
-        emit('M', u.st_mode, ufd, name);
       sub = open_lower_dir(lfd, name);
       if (sub == LOWER_UNREADABLE)
-        emit('?', u.st_mode, ufd, name);
+        tag = '?';
+      else if (mode_differs(&u, &l))
+        tag = 'M';
     }
-    walk_dir(ufd, name, u.st_mode, sub, opaque, len);
+    walk_dir(ufd, name, u.st_mode, sub, tag, opaque, len);
     return;
   }
 
   if (found == LOOKUP_ABSENT) {
-    emit('A', u.st_mode, ufd, name);
+    emit_upper('A', ufd, name, &u);
   } else if (found == LOOKUP_UNREADABLE) {
-    emit('?', u.st_mode, ufd, name);
+    emit_upper('?', ufd, name, &u);
   } else if ((u.st_mode ^ l.st_mode) & S_IFMT) {
-    emit('M', u.st_mode, ufd, name); // type change
+    emit_upper('M', ufd, name, &u); // type change
     if (S_ISDIR(l.st_mode))
       gone_children(lfd, name, len);
   } else {
     switch (compare(ufd, lfd, name, &u, &l)) {
     case CMP_CHANGED:
-      emit('M', u.st_mode, ufd, name);
+      emit_upper('M', ufd, name, &u);
       break;
     case CMP_UNREADABLE:
-      emit('?', u.st_mode, ufd, name);
+      emit_upper('?', ufd, name, &u);
       break;
     case CMP_SAME:
       break;
@@ -487,16 +586,17 @@ bool diff_print(const struct run *run, const char *ws) {
 
   // overlay_prepare gave upper the workspace root's mode, so a difference
   // here is the agent's chmod of the root.
+  char tag = 0;
   int lfd = open_lower_dir(AT_FDCWD, ws);
   if (lfd == LOWER_UNREADABLE) {
-    emit('?', S_IFDIR, -1, nullptr);
+    tag = '?';
   } else {
     if (fstat(lfd, &l) < 0)
       err(1, "stat %s", ws);
     if (mode_differs(&u, &l))
-      emit('M', S_IFDIR, -1, nullptr);
+      tag = 'M';
   }
-  walk_dir(pfd, "upper", u.st_mode, lfd, false, 0);
+  walk_dir(pfd, "upper", u.st_mode, lfd, tag, false, 0);
   if (close(pfd) < 0)
     err(1, "close %s", run->dir);
   if (fflush(stdout) == EOF)

@@ -98,6 +98,19 @@ wait "$pid" || st=$?
 check "SIGTERM kills the agent (got $st)" [ "$st" -eq 137 ]
 check "SIGTERM still prints the diff" grep -qx 'A term.txt' "$tmp/term.out"
 
+# setcap/setfattr change no bytes or mode, so only xattrs reveal them.
+if command -v setfattr >/dev/null; then
+  "$escrow" --workspace "$ws" --state "$state" -- sh -c \
+    'setfattr -n user.note -v hi keep.txt; : >new.txt
+     setfattr -n user.tag -v x new.txt' >"$tmp/xattr.out" 2>/dev/null
+  check "xattr-only change is M" \
+    grep -qx 'M keep.txt xattrs: user.note' "$tmp/xattr.out"
+  check "added file lists its xattrs" \
+    grep -qx 'A new.txt xattrs: user.tag' "$tmp/xattr.out"
+else
+  echo "skip xattr checks: setfattr not found"
+fi
+
 runs=$(ls "$state/runs" | wc -l)
 st=0
 "$escrow" --workspace "$ws/keep.txt" --state "$state" -- true 2>/dev/null ||

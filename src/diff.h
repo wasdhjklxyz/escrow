@@ -7,6 +7,7 @@ struct run;
 // entry on stdout, sorted by strcmp within each directory:
 //
 //   A|M|D|? <path>[/][ (fifo|socket|char|block|symlink)| -> <target>]
+//           [ xattrs: <name>...]
 //
 // '/' marks a dir and "./" is the workspace root. '?' means the entry could
 // not be compared because the workspace side is unreadable. A path or
@@ -14,8 +15,11 @@ struct run;
 // is printed in double quotes, with '"' and '\' backslash-escaped and other
 // unsafe bytes as octal ("a\012b"), so filenames can't forge or hide lines.
 //
-// M compares type, permission bits, size and bytes, symlink target and
-// device numbers. It does not compare owner, timestamps or xattrs. ws must
+// M compares type, permission bits, size and bytes, symlink target, device
+// numbers, and the xattrs of regular files and dirs (overlay's own
+// user.overlay.* / trusted.overlay.* ignored). A/M/? lines for those list
+// their xattr names. It does not compare owner, timestamps, or the xattrs of
+// symlinks and special files (a fifo can't be opened without blocking). ws must
 // not itself contain overlay metadata (user.overlay.* xattrs, 0/0 char
 // devices): the mount honors it but the walk reads it as plain files.
 //
