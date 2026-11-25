@@ -131,7 +131,13 @@ static bool builds_fetcher(const char *drv, char *why, size_t n) {
   bool built = false, fetcher = false;
   while (!fetcher && fgets(line, sizeof line, errs)) {
     if (line[0] != ' ') {
+      // Only the two headers nix prints are understood; anything else
+      // (a changed format) fails closed rather than skipping the check.
       built = strstr(line, "will be built") != nullptr;
+      if (!built && !strstr(line, "will be fetched")) {
+        snprintf(why, n, "unrecognized nix build --dry-run output");
+        fetcher = true;
+      }
       continue;
     }
     char *p = line + strspn(line, " ");
