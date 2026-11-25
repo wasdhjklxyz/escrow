@@ -85,7 +85,13 @@ static int setup_ns(uid_t uid, gid_t gid) {
   // Per user ns: no user ns may be created below ours, so the agent can't
   // get a fresh set of caps with `unshare -r`. Needs CAP_SYS_RESOURCE here,
   // which init has and the agent won't.
-  return write_file("/proc/sys/user/max_user_namespaces", "0");
+  if (write_file("/proc/sys/user/max_user_namespaces", "0") < 0)
+    return -1;
+  if (sethostname("escrow", strlen("escrow")) < 0) {
+    warn("sethostname");
+    return -1;
+  }
+  return 0;
 }
 
 // A new fs of `type` attached at dirfd/path. Returns the mount fd (the new
@@ -482,8 +488,10 @@ int jail_run(const struct jail *j, char *const argv[]) {
   gid_t gid = getgid();
   struct sigaction sa = {.sa_handler = SIG_DFL};
   struct clone_args ca = {
-      .flags = CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID |
-               (j->net ? 0 : CLONE_NEWNET),
+      // IPC: else the agent reads and writes the user's SysV shm and
+      // mqueues. UTS, cgroup: else it sees the host's name and cgroup path.
+      .flags = CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWIPC |
+               CLONE_NEWUTS | CLONE_NEWCGROUP | (j->net ? 0 : CLONE_NEWNET),
       .exit_signal = SIGCHLD,
   };
   siginfo_t info;

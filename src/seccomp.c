@@ -40,9 +40,18 @@ int seccomp_apply(void) {
       BPF_JUMP(BPF_JMP | BPF_JSET | BPF_K, SYSCALL_BIT_MASK, 0, 1),
       RET(SECCOMP_RET_KILL_PROCESS),
 
-      JEQ(SYS_io_uring_setup, 2, 0),
-      JEQ(SYS_io_uring_enter, 1, 0),
-      JEQ(SYS_io_uring_register, 0, 1),
+      // ENOSYS, so callers take their fallback path. io_uring makes sockets
+      // without socket(2). memfd: execveat of one runs a native binary that
+      // is in no store path. Keyrings: the inherited session keyring stays
+      // readable by ID across user namespaces.
+      JEQ(SYS_io_uring_setup, 7, 0),
+      JEQ(SYS_io_uring_enter, 6, 0),
+      JEQ(SYS_io_uring_register, 5, 0),
+      JEQ(SYS_memfd_create, 4, 0),
+      JEQ(SYS_memfd_secret, 3, 0),
+      JEQ(SYS_keyctl, 2, 0),
+      JEQ(SYS_add_key, 1, 0),
+      JEQ(SYS_request_key, 0, 1),
       ERRNO(ENOSYS),
       JEQ(SYS_socket, 1, 0),
       RET(SECCOMP_RET_ALLOW),

@@ -148,8 +148,8 @@ int overlay_mount(const struct run *run, const char *ws, int dirfd,
   }
 
   // A userns-owned superblock is already nodev, and nosuid keeps set-id
-  // bits in the workspace from meaning anything. noexec: only store paths
-  // run, so the record's store hashes cover every binary.
+  // bits in the workspace from meaning anything. noexec: store paths are
+  // the only executable files (see landlock.c).
   int mfd = fsmount(fsfd, FSMOUNT_CLOEXEC,
                     MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC);
   if (mfd < 0) {
