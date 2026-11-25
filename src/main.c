@@ -4,6 +4,7 @@
 
 #include <err.h>
 #include <getopt.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/wait.h>
@@ -12,7 +13,9 @@
   fprintf(stderr,
           "usage: escrow [--workspace DIR] [--state DIR] -- <cmd> [args...]\n"
           "  --workspace DIR  directory the command sees (default: .)\n"
-          "  --state DIR      where runs are kept (default: $ESCROW_STATE)\n");
+          "  --state DIR      where runs are kept (default: $ESCROW_STATE)\n"
+          "exit: the command's status (128+N if killed by signal N),\n"
+          "      125 setup failed, 127 exec failed, 1 escrow error, 2 usage\n");
   exit(2);
 }
 
@@ -20,7 +23,6 @@ int main(int argc, char *argv[]) {
   static const struct option opts[] = {
       {"workspace", required_argument, nullptr, 'w'},
       {"state", required_argument, nullptr, 's'},
-      {"help", no_argument, nullptr, 'h'},
       {},
   };
   const char *ws = ".";
@@ -48,16 +50,15 @@ int main(int argc, char *argv[]) {
   if (!state || !*state)
     errx(2, "no state dir: pass --state DIR or set ESCROW_STATE");
   if (!realpath(ws, wsreal))
-    err(1, "workspace %s", ws);
+    err(1, "realpath %s", ws);
 
   overlay_prepare(&run, state, wsreal);
-  int st = jail_run(&run, wsreal, &argv[optind]);
-  bool complete = diff_print(run.upper, wsreal);
-  if (!complete)
-    warnx("some entries could not be compared (marked ?)");
   warnx("run dir: %s", run.dir);
+  int status = jail_run(&run, wsreal, &argv[optind]);
+  if (!diff_print(&run, wsreal))
+    warnx("some entries could not be compared (marked ?)");
 
-  if (WIFSIGNALED(st))
-    return 128 + WTERMSIG(st);
-  return WEXITSTATUS(st);
+  if (WIFSIGNALED(status))
+    return 128 + WTERMSIG(status);
+  return WEXITSTATUS(status);
 }
