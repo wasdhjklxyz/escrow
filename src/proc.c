@@ -5,13 +5,14 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 extern char **environ;
 
-static pid_t spawn(char *const argv[], int in_fd, int out_fd) {
+static pid_t spawn(char *const argv[], int in_fd, int out_fd, int err_fd) {
   posix_spawn_file_actions_t fa;
   pid_t pid;
   int e;
@@ -24,6 +25,8 @@ static pid_t spawn(char *const argv[], int in_fd, int out_fd) {
     e = posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
   if (e == 0 && out_fd >= 0)
     e = posix_spawn_file_actions_adddup2(&fa, out_fd, 1);
+  if (e == 0 && err_fd >= 0)
+    e = posix_spawn_file_actions_adddup2(&fa, err_fd, 2);
   if (e != 0)
     (errno = e), err(1, "posix_spawn_file_actions");
   // escrow ignores SIGINT/SIGQUIT/SIGPIPE, and ignored dispositions
@@ -55,7 +58,11 @@ static int wait_for(pid_t pid, const char *what) {
 }
 
 int run_cmd(char *const argv[], int in_fd, int out_fd) {
-  return wait_for(spawn(argv, in_fd, out_fd), argv[0]);
+  return run_cmd_err(argv, in_fd, out_fd, -1);
+}
+
+int run_cmd_err(char *const argv[], int in_fd, int out_fd, int err_fd) {
+  return wait_for(spawn(argv, in_fd, out_fd, err_fd), argv[0]);
 }
 
 void sha256_open(struct sha256 *h) {
@@ -64,7 +71,7 @@ void sha256_open(struct sha256 *h) {
 
   if (pipe2(in, O_CLOEXEC) < 0 || pipe2(out, O_CLOEXEC) < 0)
     err(1, "pipe2");
-  h->pid = spawn(argv, in[0], out[1]);
+  h->pid = spawn(argv, in[0], out[1], -1);
   close(in[0]);
   close(out[1]);
   h->in = in[1];
@@ -144,4 +151,21 @@ void sha256_buf(const void *buf, size_t n, char hex[SHA256_HEX + 1]) {
   sha256_open(&h);
   sha256_write(&h, buf, n);
   sha256_close(&h, hex);
+}
+
+void print_escaped(FILE *in) {
+  int c;
+  while ((c = getc(in)) != EOF) {
+    if ((c < 0x20 && c != '\t' && c != '\n') || c >= 0x7f)
+      printf("\\%03o", c);
+    else
+      putchar(c);
+  }
+}
+
+void remove_dir(const char *path) {
+  char *chmod[] = {"chmod", "-R", "u+rwx", (char *)path, nullptr};
+  char *rm[] = {"rm", "-rf", "--one-file-system", (char *)path, nullptr};
+  if (run_cmd(chmod, -1, -1) != 0 || run_cmd(rm, -1, -1) != 0)
+    warnx("could not remove %s", path);
 }

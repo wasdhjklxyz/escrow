@@ -2,6 +2,7 @@
 
 #include "apply.h"
 #include "changes.h"
+#include "closure.h"
 #include "log.h"
 #include "overlay.h"
 #include "policy.h"
@@ -199,18 +200,6 @@ static void load(struct proposal *p, const struct log *log,
 
 // ---------------------------------------------------------------- review
 
-// Prints bytes so file contents can't drive the terminal: control bytes
-// (but \t and \n) and anything >= 0x7f (UTF-8, bidi overrides) as \ooo.
-static void print_safe(FILE *in) {
-  int c;
-  while ((c = getc(in)) != EOF) {
-    if ((c < 0x20 && c != '\t' && c != '\n') || c >= 0x7f)
-      printf("\\%03o", c);
-    else
-      putchar(c);
-  }
-}
-
 static FILE *temp_with(const void *data, size_t n) {
   FILE *t = tmpfile();
   if (!t || (n && fwrite(data, 1, n, t) != n) || fflush(t) == EOF)
@@ -267,7 +256,7 @@ static void show_content(int root, const struct change *c) {
   if (st > 1)
     errx(1, "diff failed");
   rewind(out);
-  print_safe(out);
+  print_escaped(out);
   fclose(out);
   fclose(next);
   if (base)
@@ -339,6 +328,7 @@ static void render(const struct proposal *p) {
     free(q);
   }
   close(root);
+  closure_diff(p->rec.workspace, &p->cs);
   fflush(stdout);
 }
 
@@ -492,15 +482,6 @@ static void write_statement(const char *path, const char *text) {
     err(1, "write %s", path);
 }
 
-// Removes a staging or old tree. Its dirs may be 0555 (a signed mode), so
-// give u+rwx back first; chmod -R doesn't follow symlinks it meets.
-static void rm_rf(const char *path) {
-  char *chmod[] = {"chmod", "-R", "u+rwx", (char *)path, nullptr};
-  char *rm[] = {"rm", "-rf", "--one-file-system", (char *)path, nullptr};
-  if (run_cmd(chmod, -1, -1) != 0 || run_cmd(rm, -1, -1) != 0)
-    warnx("could not remove %s", path);
-}
-
 int cmd_apply(int argc, char *argv[]) {
   struct args o;
   static struct roles roles; // static: reachable at exit, for LeakSanitizer
@@ -542,16 +523,16 @@ int cmd_apply(int argc, char *argv[]) {
   // The copy must be the reviewed base: a writer that changed the workspace
   // during the copy and changed it back would slip past the checks on ws.
   if (!tree_hash(stage, now) || strcmp(now, p.rec.base) != 0) {
-    rm_rf(stage);
+    remove_dir(stage);
     errx(1, "%s: changed while being copied; nothing applied", ws);
   }
   umask(0); // belt and braces: apply.c sets every mode explicitly anyway
   if (apply_changes(&p.cs, stage) < 0 || !tree_hash(stage, post)) {
-    rm_rf(stage);
+    remove_dir(stage);
     errx(1, "apply failed; the workspace is untouched");
   }
   if (!tree_hash(ws, now) || strcmp(now, p.rec.base) != 0) {
-    rm_rf(stage);
+    remove_dir(stage);
     errx(1, "%s: the workspace moved during apply; nothing changed", ws);
   }
 
@@ -565,7 +546,7 @@ int cmd_apply(int argc, char *argv[]) {
   if (!(who->roles & ROLE_SIGNER) || who == p.requester) {
     unlink(sig);
     unlink(stmt);
-    rm_rf(stage);
+    remove_dir(stage);
     errx(1, "%s may not apply: needs a signer who didn't request it",
          who->name);
   }
@@ -573,7 +554,7 @@ int cmd_apply(int argc, char *argv[]) {
     int e = errno;
     unlink(sig);
     unlink(stmt);
-    rm_rf(stage);
+    remove_dir(stage);
     (errno = e), err(1, "renameat2 RENAME_EXCHANGE %s", ws);
   }
   // Swap, then log. A crash in between leaves the workspace applied with no
@@ -582,7 +563,7 @@ int cmd_apply(int argc, char *argv[]) {
   struct log_line line = step_line(EV_APPLY, &p, who, sig, &roles);
   strcpy(line.extra, post);
   log_append(&log, &line);
-  rm_rf(stage); // the old tree now
+  remove_dir(stage); // the old tree now
   warnx("applied %s as %s", o.id, who->name);
   return 0;
 }
