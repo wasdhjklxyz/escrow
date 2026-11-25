@@ -94,11 +94,13 @@
             tools = with pkgs; [
               bash
               coreutils
+              gnugrep
               gnused
               (writeShellApplication {
                 name = "ops-ticket";
                 runtimeInputs = [
                   coreutils
+                  gnugrep
                   gnused
                 ];
                 text = builtins.readFile ./demo/agent/ops-ticket.sh;
