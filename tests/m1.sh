@@ -26,7 +26,7 @@ echo b > "$ws/olddir/b"
 echo x > "$ws/replaced/x"
 before=$(snapshot "$ws")
 
-XDG_STATE_HOME=$tmp/state "$escrow" --workspace "$ws" -- \
+"$escrow" --state "$tmp/state" --workspace "$ws" -- \
   "$here/agent/m1.sh" > "$tmp/out" 2> "$tmp/err" || fail "escrow exited $?"
 run=$(sed -n 's/^escrow: run //p' "$tmp/err")
 [ -d "$run/upper" ] || fail "no run dir in: $(cat "$tmp/err")"
@@ -54,10 +54,31 @@ sleep 2
 [ ! -e "$run/upper/late.txt" ] || fail "background writer outlived the agent"
 echo "PASS: locked dir restored, leftovers killed"
 
-if XDG_STATE_HOME=$ws/state "$escrow" --workspace "$ws" -- true \
+# A workspace dir the host user can't read (the agent can, via
+# CAP_DAC_OVERRIDE in its userns), and a mode change on an existing dir.
+ws2=$tmp/ws2
+mkdir -p "$ws2/sec" "$ws2/open"
+chmod 000 "$ws2/sec"
+"$escrow" --state "$tmp/state" --workspace "$ws2" -- \
+  sh -c 'echo n > sec/new && chmod 777 open' > "$tmp/out2" 2> "$tmp/err2" ||
+  fail "escrow exited $? on unreadable lower: $(cat "$tmp/err2")"
+run2=$(sed -n 's/^escrow: run //p' "$tmp/err2")
+printf 'M open/\n? sec/\nA sec/new\n' | diff -u - "$tmp/out2" ||
+  fail "unreadable-lower diff"
+[ "$(stat -c %a "$run2/upper/sec")" = 0 ] || fail "upper sec mode not restored"
+[ "$(stat -c %a "$ws2/sec")" = 0 ] || fail "workspace sec mode changed"
+echo "PASS: unreadable lower marked, dir mode change reported"
+
+if "$escrow" --state "$ws/state" --workspace "$ws" -- true \
   2> "$tmp/err"; then
   fail "state dir inside workspace accepted"
 fi
 grep -q 'is inside workspace' "$tmp/err" || fail "overlap error: $(cat "$tmp/err")"
 [ "$before" = "$(snapshot "$ws")" ] || fail "overlap refusal touched workspace"
 echo "PASS: overlap refused"
+
+if env -u ESCROW_STATE "$escrow" --workspace "$ws" -- true 2> "$tmp/err"; then
+  fail "missing state dir accepted"
+fi
+grep -q 'no state dir' "$tmp/err" || fail "no-state error: $(cat "$tmp/err")"
+echo "PASS: state dir required"
