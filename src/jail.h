@@ -16,7 +16,8 @@ enum {
  * argv in the merged dir. The parent stays in the host namespaces. */
 pid_t jail_spawn(const struct overlay *ov, char *const argv[]);
 
-/* Wait for the child; returns its exit status, or 128+sig if killed. */
+/* Wait for the child, then kill and reap anything it left running. Returns
+ * the child's exit status, or 128+sig if killed. */
 int jail_wait(pid_t pid);
 
 #endif

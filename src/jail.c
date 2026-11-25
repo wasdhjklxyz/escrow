@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/prctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -75,11 +76,18 @@ static void write_map(const char *path, unsigned id) {
   _exit(e == ENOENT ? JAIL_ENOENT : JAIL_ENOEXEC);
 }
 
+static struct sigaction old_int, old_quit;
+
 pid_t jail_spawn(const struct overlay *ov, char *const argv[]) {
   /* Must be read before unshare: inside the new userns, until the maps are
    * written, these return the overflow id (65534). */
   uid_t uid = getuid();
   gid_t gid = getgid();
+
+  /* Orphaned descendants of the agent reparent to us instead of init, so
+   * jail_wait can kill and reap them before the diff. Not inherited. */
+  if (prctl(PR_SET_CHILD_SUBREAPER, 1) < 0)
+    err(1, "prctl(PR_SET_CHILD_SUBREAPER)");
 
   if (fflush(NULL) == EOF)
     err(1, "fflush");
@@ -94,11 +102,48 @@ pid_t jail_spawn(const struct overlay *ov, char *const argv[]) {
   struct sigaction sa = {.sa_handler = SIG_IGN};
   if (sigemptyset(&sa.sa_mask) < 0)
     err(1, "sigemptyset");
-  if (sigaction(SIGINT, &sa, NULL) < 0)
+  if (sigaction(SIGINT, &sa, &old_int) < 0)
     err(1, "sigaction SIGINT");
-  if (sigaction(SIGQUIT, &sa, NULL) < 0)
+  if (sigaction(SIGQUIT, &sa, &old_quit) < 0)
     err(1, "sigaction SIGQUIT");
   return pid;
+}
+
+/* SIGKILL every current child (agent leftovers reparented to us). */
+static void kill_children(void) {
+  char path[64];
+  int n =
+      snprintf(path, sizeof path, "/proc/self/task/%d/children", (int)getpid());
+  if (n < 0 || (size_t)n >= sizeof path)
+    errx(1, "format children path");
+  FILE *f = fopen(path, "re");
+  if (f == NULL)
+    err(1, "open %s", path);
+  long p;
+  while (fscanf(f, "%ld", &p) == 1)
+    if (kill((pid_t)p, SIGKILL) < 0 && errno != ESRCH)
+      err(1, "kill %ld", p);
+  if (ferror(f))
+    err(1, "read %s", path);
+  if (fclose(f) == EOF)
+    err(1, "close %s", path);
+}
+
+/*
+ * The change set is frozen when the agent exits: anything it left running
+ * is killed and reaped, so nothing writes to upper after (or during) the
+ * diff. Each reap can reparent grandchildren to us, hence the loop.
+ */
+static void reap_rest(void) {
+  for (;;) {
+    kill_children();
+    if (waitpid(-1, NULL, 0) < 0) {
+      if (errno == ECHILD)
+        return;
+      if (errno != EINTR)
+        err(1, "waitpid");
+    }
+  }
 }
 
 int jail_wait(pid_t pid) {
@@ -106,6 +151,11 @@ int jail_wait(pid_t pid) {
   while (waitpid(pid, &st, 0) < 0)
     if (errno != EINTR)
       err(1, "waitpid %d", (int)pid);
+  reap_rest();
+  if (sigaction(SIGINT, &old_int, NULL) < 0)
+    err(1, "sigaction SIGINT");
+  if (sigaction(SIGQUIT, &old_quit, NULL) < 0)
+    err(1, "sigaction SIGQUIT");
   if (WIFEXITED(st))
     return WEXITSTATUS(st);
   if (WIFSIGNALED(st))
