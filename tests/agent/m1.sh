@@ -15,7 +15,9 @@ rm -rf replaced # replaced/ comes back as an opaque dir
 mkdir replaced
 echo y >replaced/y
 chmod 700 modedir
-echo z >locked/z # locked/ is 000 in the workspace: root in the ns can write
+chmod 700 locked # 000 in the workspace: the owner may still chmod it
+echo z >locked/z
+chmod 000 locked
 mkdir hidden
 echo s >hidden/s
 chmod 000 hidden # escrow must still walk it, then restore the mode
