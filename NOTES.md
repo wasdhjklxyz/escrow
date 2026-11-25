@@ -22,3 +22,22 @@
 - **OCI layer export (later, low).** upper to tar, with `.wh.` /
   `.wh..wh..opq` whiteouts. Needs a tar writer, and the target users gain
   little.
+- **Effect claim alongside the diff (later, M5 "where this goes").** For
+  NixOS workspaces, record the `nix eval` option-tree delta next to the file
+  diff and sign both. Never instead of the diff: the option tree misses
+  activation scripts, readFile'd files, and non-NixOS workspaces.
+- **Transcript hash (later, needs the proxy).** Record a sha256 of the
+  agent's API transcript in the proposal, not a replayable capture: LLMs are
+  not deterministic, and the raw traffic carries API keys and client data.
+- **Escrowed outbox (later, M5 "where this goes").** Hold outbound side
+  effects (HTTP POST, kubectl apply) as pending and replay them only after
+  signing. Limit: the agent sees fake responses, so read-after-write and
+  non-idempotent calls can't be deferred.
+- **Canaries (later, low; merge with the flight recorder).** Fake creds and
+  honey hosts in the jail's view taint the proposal when touched. The jail
+  holds no real secrets, so this is a reviewer signal, and detecting reads
+  has the same unprivileged-tracing problem.
+- **Blast-radius signer count (M3 format, policy later).** Let the record
+  hold N signatures now. Later, a host-side score from the built closure
+  diff (setuid, services, firewall, caps) can only raise the signer count
+  above the policy minimum, never lower it.
