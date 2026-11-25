@@ -253,4 +253,81 @@ head -n -1 state/log >log.tmp && cat log.tmp >state/log
 
 check "verify-log still ok" sh -c '"$1" verify-log >/dev/null' _ "$escrow"
 
+# -- a requester forging other people's log lines (separate state) ---------
+export ESCROW_STATE=$tmp/state2
+mkdir ws2
+echo base >ws2/f
+# append_line EVENT ID PRINCIPAL KEY NS DATA: sign DATA, append a valid line.
+append_line() {
+  seq=$(($(wc -l <"$ESCROW_STATE/log") + 1))
+  sig=$ESCROW_STATE/runs/$2/$seq-$1.sig
+  ssh-keygen -q -Y sign -f "$4" -n "$5" <"$6" >"$sig"
+  prev=$(tail -n1 "$ESCROW_STATE/log" | sha256sum | cut -d' ' -f1)
+  rsha=$(sha256sum "$ESCROW_STATE/runs/$2/record" | cut -d' ' -f1)
+  ssha=$(sha256sum "$sig" | cut -d' ' -f1)
+  echo "$seq 2026-01-01T00:00:00Z $1 $2 $3 $rsha $ssha - $roles_sha $prev" \
+    >>"$ESCROW_STATE/log"
+}
+"$escrow" --role "$policy" --workspace ws2 --key erin -- \
+  sh -c 'echo pwn >pwn' >/dev/null 2>&1
+pf=$(last_id)
+append_line review "$pf" erin erin escrow-review "$ESCROW_STATE/runs/$pf/record"
+refused "forged self-review: sign refused" "reviewed by its requester" \
+  "$escrow" sign "$pf" --key carol
+"$escrow" --role "$policy" --workspace ws2 --key alice -- \
+  sh -c 'echo pwn2 >pwn2' >/dev/null 2>&1
+pg=$(last_id)
+append_line sign "$pg" carol carol escrow-sign "$ESCROW_STATE/runs/$pg/record"
+refused "forged sign without review: apply refused" "signed before any review" \
+  "$escrow" apply "$pg" --key carol
+check "forged lines: nothing applied" sh -c '[ ! -e ws2/pwn ] && [ ! -e ws2/pwn2 ]'
+
+# -- review shows a recursive delete in full; modes survive exactly --------
+export ESCROW_STATE=$tmp/state3
+mkdir -p ws3/etc/ssh ws3/ro
+echo key >ws3/etc/ssh/authorized_keys
+echo root >ws3/etc/passwd
+echo a >ws3/ro/a
+chmod 555 ws3/ro
+"$escrow" --role "$policy" --workspace ws3 --key alice -- sh -c '
+  chmod -R u+w etc; find etc -delete; echo harmless >etc
+  chmod u+w ro; echo b >ro/a; chmod 555 ro
+  echo s >secret; chmod 400 secret; mkdir lockd; chmod 500 lockd
+  echo x >rox; setfattr -n user.k -v v rox; chmod 444 rox' >/dev/null 2>&1
+pm=$(last_id)
+"$escrow" review "$pm" >review3.out 2>/dev/null
+check "dir -> file: review says so" grep -q '^M etc dir -> file' review3.out
+check "dir -> file: review lists what goes" \
+  sh -c 'grep -qx "    deletes etc/ssh/authorized_keys" review3.out &&
+         grep -qx "    deletes etc/passwd" review3.out'
+check "review shows the agent's modes" \
+  sh -c 'grep -q "^A secret file mode 0400" review3.out &&
+         grep -q "^A lockd dir mode 0500" review3.out'
+must "bob reviews pm" "$escrow" review "$pm" --key bob
+must "carol signs pm" "$escrow" sign "$pm" --key carol
+must "carol applies pm (read-only dir, read-only file with xattr)" \
+  "$escrow" apply "$pm" --key carol
+check "apply: modes exactly as the agent left them" sh -c \
+  '[ "$(stat -c %a ws3/secret)" = 400 ] && [ "$(stat -c %a ws3/lockd)" = 500 ] &&
+   [ "$(stat -c %a ws3/ro)" = 555 ] && [ "$(stat -c %a ws3/rox)" = 444 ]'
+check "apply: through a 0555 dir" [ "$(cat ws3/ro/a)" = b ]
+check "apply: dir replaced by a file" [ "$(cat ws3/etc)" = harmless ]
+st=0
+"$escrow" --role "$policy" --workspace ws3 --key alice -- \
+  sh -c 'echo s >hidden; chmod 000 hidden' >/dev/null 2>"$tmp/hidden.err" || st=$?
+check "unreadable mode: not proposable" sh -c \
+  '[ "$1" -eq 1 ] && grep -q "unable to read it" "$2"' _ "$st" "$tmp/hidden.err"
+
+# -- the reader's own path check, on a change set the record really pins ---
+"$escrow" --role "$policy" --workspace ws3 --key alice -- true >/dev/null 2>&1
+pd=$(last_id)
+printf 'escrow-changes 1\nD 0 2 0\n..e\n' >"$ESCROW_STATE/runs/$pd/changes"
+csha=$(sha256sum "$ESCROW_STATE/runs/$pd/changes" | cut -d' ' -f1)
+sed -i "s/^changes .*/changes $csha/" "$ESCROW_STATE/runs/$pd/record"
+head -n -1 "$ESCROW_STATE/log" >log.tmp && cat log.tmp >"$ESCROW_STATE/log"
+append_line propose "$pd" alice alice escrow-propose \
+  "$ESCROW_STATE/runs/$pd/record"
+refused "re-pinned change set with ..: the reader refuses it" "bad path" \
+  "$escrow" review "$pd"
+
 [ "$fails" -eq 0 ]
