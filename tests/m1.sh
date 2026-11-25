@@ -111,6 +111,27 @@ else
   echo "skip xattr checks: setfattr not found"
 fi
 
+# $PWD must name the merged view, or $PWD-based writes hit the host.
+"$escrow" --workspace "$ws" --state "$state" -- \
+  sh -c 'echo p >"$PWD/pwd.txt"' >"$tmp/pwd.out" 2>/dev/null
+check "\$PWD write lands in the overlay" grep -qx 'A pwd.txt' "$tmp/pwd.out"
+check "\$PWD write left workspace unchanged" [ "$(snapshot)" = "$before" ]
+
+# More diff than a pipe holds, through head: SIGPIPE must not kill escrow
+# with the locked dir still relaxed.
+pstate=$tmp/pstate
+"$escrow" --workspace "$ws" --state "$pstate" -- sh -c \
+  'mkdir L; i=0; while [ $i -lt 3000 ]; do : >L/a_longish_file_name_$i
+   i=$((i + 1)); done; chmod 000 L' 2>/dev/null | head -n1 >/dev/null
+prun=$(echo "$pstate"/runs/*)
+check "closed stdout still restores modes" \
+  [ "$(stat -c %a "$prun/upper/L")" = 0 ]
+
+st=0
+sh -c 'sleep 5 & exec "$@"' _ "$escrow" --workspace "$ws" --state "$state" \
+  -- true 2>/dev/null || st=$?
+check "inherited children refused (got $st)" [ "$st" -eq 1 ]
+
 runs=$(ls "$state/runs" | wc -l)
 st=0
 "$escrow" --workspace "$ws/keep.txt" --state "$state" -- true 2>/dev/null ||
