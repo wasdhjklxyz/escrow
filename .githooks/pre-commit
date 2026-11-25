@@ -1,0 +1,11 @@
+#!/bin/sh
+
+# Fail the commit if staged C files aren't clang-formatted
+
+files=$(git diff --cached --name-only --diff-filter=ACM -- '*.c' '*.h')
+[ -z "$files" ] && exit 0
+
+if ! clang-format --dry-run --Werror $files; then
+  echo "pre-commit: run 'clang-format -i $files' and re-stage" >&2
+  exit 1
+fi
