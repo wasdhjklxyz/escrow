@@ -160,4 +160,17 @@ st=0
 check "malformed policy refused" [ "$st" -eq 1 ]
 check "refusal names the bad path" grep -q 'not a store path' "$tmp/err"
 
+# --env NAME hands exactly that variable to the agent; others stay out.
+estate=$tmp/estate
+ESCROW_PASS=handed ESCROW_KEEP_OUT=leaked escrow --workspace "$ws" \
+  --state "$estate" --env ESCROW_PASS -- sh -c \
+  'printf %s "$ESCROW_PASS" >got; [ -z "${ESCROW_KEEP_OUT-}" ] && : >clean' \
+  >"$tmp/env.out" 2>/dev/null
+erun=$(echo "$estate"/runs/*)
+check "--env: the named variable arrives" [ "$(cat "$erun/upper/got")" = handed ]
+check "--env: other host variables stay out" [ -e "$erun/upper/clean" ]
+st=0
+escrow --workspace "$ws" --state "$estate" --env PATH -- true 2>/dev/null || st=$?
+check "--env: reserved names refused" [ "$st" -eq 2 ]
+
 [ "$fails" -eq 0 ]
