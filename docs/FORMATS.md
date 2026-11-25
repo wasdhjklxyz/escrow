@@ -53,6 +53,8 @@ time <YYYY-MM-DDTHH:MM:SSZ>
 workspace <absolute path, needs no quoting, no trailing />
 cmd <argv: each element quoted (below), joined by one space>
 exit <0..255; 128+N = killed by signal N>
+net <0 or 1: whether the agent had --net>
+env <the --env variable names, space-separated, or ->   (never values)
 escrow <path of the escrow binary, quoted>
 role-policy <sha256 of the role policy file>
 role-env <role env store path>
