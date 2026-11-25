@@ -1,5 +1,5 @@
 #!/bin/sh
-# Cooperative M1 test agent. Runs with cwd at the merged overlay view and
+# Cooperative M1 test agent. Runs with cwd at /work (the overlay) and
 # makes one change of each kind that tests/m1.sh expects in the diff.
 set -eu
 
