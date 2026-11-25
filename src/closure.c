@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 enum { OUT_MAX = 1 << 16 };
@@ -48,6 +49,11 @@ static bool capture(char *const argv[], char *out, size_t n, FILE *errs) {
   rewind(o);
   size_t got = fread(out, 1, n - 1, o);
   out[got] = '\0';
+  // Output that doesn't fit is a failure, never a silently shorter string.
+  if (got == n - 1 && getc(o) != EOF) {
+    ok = false;
+    out[0] = '\0';
+  }
   if (got && out[got - 1] == '\n')
     out[got - 1] = '\0';
   fclose(o);
@@ -79,6 +85,35 @@ static bool drv_path(const char *dir, const char *name, bool agent_written,
 // agent wrote could send workspace data anywhere. Refuse if `nix build
 // --dry-run` would build (not substitute) any. Over-matching is fine: a
 // false positive only skips the closure diff.
+// True if drv is (or may be) fixed-output: any hash field anywhere in the
+// whole `nix derivation show` output. Read in full, never through a fixed
+// buffer: the agent controls the env and can pad it past any cap. Fails
+// closed: if the output can't be had, it counts as fixed-output.
+static bool is_fixed_output(const char *drv) {
+  char *show[] = {"nix", "derivation", "show", (char *)drv, nullptr};
+  FILE *o = tmpfile(), *e = tmpfile();
+  struct stat st;
+  if (!o || !e)
+    err(1, "tmpfile");
+  bool ok = run_cmd_err(show, -1, fileno(o), fileno(e)) == 0 &&
+            fstat(fileno(o), &st) == 0;
+  fclose(e);
+  char *buf = ok ? malloc((size_t)st.st_size + 1) : nullptr;
+  if (ok && !buf)
+    err(1, "malloc");
+  if (ok) {
+    rewind(o);
+    ok = fread(buf, 1, (size_t)st.st_size, o) == (size_t)st.st_size;
+    buf[ok ? st.st_size : 0] = '\0';
+  }
+  fclose(o);
+  bool fod = !ok || memmem(buf, (size_t)st.st_size, "outputHash", 10) ||
+             memmem(buf, (size_t)st.st_size, "\"hashAlgo\"", 10) ||
+             memmem(buf, (size_t)st.st_size, "\"hash\":", 7);
+  free(buf);
+  return fod;
+}
+
 static bool builds_fetcher(const char *drv, char *why, size_t n) {
   char ref[PATH_MAX + 8], line[PATH_MAX + 64];
   static char out[OUT_MAX];
@@ -104,9 +139,7 @@ static bool builds_fetcher(const char *drv, char *why, size_t n) {
     size_t len = strlen(p);
     if (!built || len < 4 || strcmp(p + len - 4, ".drv") != 0)
       continue;
-    char *show[] = {"nix", "derivation", "show", p, nullptr};
-    if (!capture(show, out, sizeof out, nullptr) || strstr(out, "outputHash") ||
-        strstr(out, "\"hashAlgo\"") || strstr(out, "\"hash\":")) {
+    if (is_fixed_output(p)) {
       snprintf(why, n, "it would build fixed-output derivation %s", p);
       fetcher = true;
     }
