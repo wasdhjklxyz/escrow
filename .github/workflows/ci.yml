@@ -1,13 +1,73 @@
 name: ci
 on: [push, pull_request]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash # -eo pipefail
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: cachix/install-nix-action@v31
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
       - name: build
         run: nix build -L
       - name: format
         run: nix develop -c sh -c 'git ls-files "*.c" "*.h" | xargs -r clang-format --dry-run --Werror'
+
+      - name: preflight
+        run: |
+          min=6.8
+          kver=$(uname -r)
+          echo "kernel $kver"
+          if [ "$(printf '%s\n' "$min" "${kver%%-*}" | sort -V | head -n1)" != "$min" ]; then
+            echo "::error::kernel $kver < $min: escrow needs overlayfs lowerdir+ via fsconfig"
+            exit 1
+          fi
+          lsm=$(cat /sys/kernel/security/lsm)
+          echo "lsm $lsm"
+          if ! grep -qw landlock <<<"${lsm//,/ }"; then
+            echo "::error::Landlock not in the active LSM list: $lsm"
+            exit 1
+          fi
+          # AppArmor on 24.04 blocks unprivileged user namespaces.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          if ! unshare --user --map-root-user --mount true; then
+            echo "::error::unprivileged user + mount namespaces still blocked"
+            exit 1
+          fi
+          # escape.sh skips cases without these; in CI that's a silent hole.
+          for t in nc script setfattr; do
+            if ! p=$(nix develop -c sh -c "command -v $t"); then
+              echo "::error::$t not on PATH inside nix develop"
+              exit 1
+            fi
+            echo "$t $p"
+          done
+
+      - name: debug build
+        run: |
+          nix develop -c cmake -B build -DCMAKE_BUILD_TYPE=Debug
+          nix develop -c cmake --build build
+      - name: test role
+        run: nix build -L .#role-test -o build/role-test
+      - name: m1
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: nix develop -c tests/m1.sh "$PWD/build/bin/escrow" "$PWD/build/role-test"
+      - name: escape
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: nix develop -c tests/escape.sh "$PWD/build/bin/escrow" "$PWD/build/role-test"
