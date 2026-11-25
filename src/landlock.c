@@ -81,8 +81,10 @@ int landlock_apply(int abi, bool net, int log) {
   const __u64 rw_file =
       fs_all & (LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_READ_FILE |
                 LANDLOCK_ACCESS_FS_TRUNCATE | LANDLOCK_ACCESS_FS_IOCTL_DEV);
-  // No EXECUTE: only store paths run, so the record's store hashes cover
-  // every binary. The mounts are noexec too (ld.so mmap is not EXECUTE).
+  // No EXECUTE: store paths are the only executable files, so the record's
+  // store hashes cover every binary that can be exec'd. The mounts are
+  // noexec too (ld.so mmap is not EXECUTE), and seccomp blocks memfd.
+  // Code loaded into memory (an interpreter, a JIT) is out of reach.
   const __u64 rw = fs_all & ~LANDLOCK_ACCESS_FS_EXECUTE;
   struct landlock_ruleset_attr attr = {.handled_access_fs = fs_all};
 
