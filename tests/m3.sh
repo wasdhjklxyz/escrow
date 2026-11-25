@@ -26,7 +26,17 @@ check() {
     fails=$((fails + 1))
   fi
 }
-# refused NAME CMD...: CMD must fail (exit 1) and print WHY to stderr.
+# must STEP CMD...: a setup step; on failure print why and stop.
+must() {
+  step=$1
+  shift
+  if ! "$@" >"$tmp/must.out" 2>&1; then
+    echo "FAIL setup: $step"
+    sed 's/^/     /' "$tmp/must.out"
+    exit 1
+  fi
+}
+# refused NAME WHY CMD...: CMD must fail and print WHY to stderr.
 refused() {
   name=$1 why=$2
   shift 2
@@ -69,7 +79,8 @@ ln -s /etc ws/etc-link
 run --key alice -- sh -c '
   sed -i "s/\"alice\" \]/\"alice\" \"bob\" ]/" etc/ops.nix
   printf "new-key\033[2J\n" >etc/service.key
-  mkdir new; echo x >new/f; unlink etc-link' >/dev/null
+  mkdir new; echo x >new/f; unlink etc-link
+  mkdir ro; echo r >ro/f; chmod 555 ro' >/dev/null
 p1=$(last_id)
 check "propose: listed" sh -c '"$1" list | grep -q "^$2 .*proposed *alice"' \
   _ "$escrow" "$p1"
@@ -90,25 +101,27 @@ refused "unknown key can't review" "signed by no key" \
   "$escrow" review "$p1" --key mallory
 refused "signer-only key can't review" "is not a reviewer" \
   "$escrow" review "$p1" --key carol
-"$escrow" review "$p1" --key bob >/dev/null 2>&1
+must "bob reviews p1" "$escrow" review "$p1" --key bob
 refused "second review refused" "already reviewed" \
   "$escrow" review "$p1" --key dave
 refused "reviewer-only key can't sign" "is not a signer" \
   "$escrow" sign "$p1" --key bob
-refused "apply before signing" "is not signed" \
+refused "apply before signing" "has not been signed" \
   "$escrow" apply "$p1" --key carol
 check "no stray signature files from refusals" \
   sh -c '[ "$(ls state/runs/$1/*.sig | wc -l)" -eq 2 ]' _ "$p1"
-"$escrow" sign "$p1" --key carol >/dev/null 2>&1
+must "carol signs p1" "$escrow" sign "$p1" --key carol
 check "workspace untouched until apply" [ "$(snapshot ws)" = "$before" ]
 refused "requester can't apply" "may not apply" \
   "$escrow" apply "$p1" --key alice
-"$escrow" apply "$p1" --key carol 2>/dev/null
+must "carol applies p1" "$escrow" apply "$p1" --key carol
 check "apply: config changed" \
   grep -qx 'users.ops = \[ "alice" "bob" \];' ws/etc/ops.nix
 check "apply: exact bytes" \
   [ "$(od -An -c ws/etc/service.key | tr -d ' \n')" = 'new-key033[2J\n' ]
 check "apply: new dir and file" [ "$(cat ws/new/f)" = x ]
+check "apply: 0555 dir got its child" \
+  sh -c '[ "$(cat ws/ro/f)" = r ] && [ "$(stat -c %a ws/ro)" = 555 ]'
 check "apply: symlink deleted, not followed" \
   sh -c '[ ! -e ws/etc-link ] && [ ! -L ws/etc-link ] && [ -d /etc ]'
 check "apply: untouched file kept" [ "$(cat ws/keep)" = keep ]
@@ -123,15 +136,15 @@ check "list shows applied" sh -c '"$1" list | grep -q "^$2 .*applied"' \
 # -- dual-role principal: dave may review or sign, never both -------------
 run --key alice -- sh -c 'echo two >two' >/dev/null
 p2=$(last_id)
-"$escrow" review "$p2" --key dave >/dev/null 2>&1
+must "dave reviews p2" "$escrow" review "$p2" --key dave
 refused "reviewer can't also sign" "reviewed it" \
   "$escrow" sign "$p2" --key dave
 
 # -- self-review: erin holds requester and reviewer ---------------------
 run --key erin -- sh -c 'echo e >e' >/dev/null
-pe=$(last_id)
+p_erin=$(last_id)
 refused "requester can't review her own" "no self-review" \
-  "$escrow" review "$pe" --key erin
+  "$escrow" review "$p_erin" --key erin
 
 # -- tampering ------------------------------------------------------------
 cp "state/runs/$p2/record" rec.bak
@@ -144,6 +157,8 @@ refused "tampered change set refused" "not the change set" \
   "$escrow" review "$p2"
 truncate -s -1 "state/runs/$p2/changes"
 cp state/log log.bak
+# Line 2 edited: the chain breaks at line 3, whose prev no longer matches.
+# An edit to the last line shows only against a head kept elsewhere.
 sed -i '2s/T/X/' state/log
 refused "edited log line refused" "log line 3: chain broken" \
   "$escrow" verify-log
@@ -151,18 +166,22 @@ cp log.bak state/log
 sed -i '1d' state/log
 refused "removed log line refused" "seq 2 out of order" "$escrow" verify-log
 cp log.bak state/log
-"$escrow" sign "$p2" --key carol >/dev/null 2>&1
+must "carol signs p2" "$escrow" sign "$p2" --key carol
 echo drift >ws/drift
 refused "base moved: apply refused" "workspace moved" \
   "$escrow" apply "$p2" --key carol
 check "base moved: workspace untouched" [ ! -e ws/two ]
 unlink ws/drift
+mkdir ".ws.escrow-$p2"
+refused "leftover staging dir refused" "exists" \
+  "$escrow" apply "$p2" --key carol
+rmdir ".ws.escrow-$p2"
 cp roles roles.bak
 echo "eve requester $(pub mallory)" >>roles
-refused "roles file changed: refused" "different roles file" \
+refused "roles file changed: refused" "roles file sha256" \
   "$escrow" review "$p2"
 cp roles.bak roles
-"$escrow" apply "$p2" --key carol 2>/dev/null
+must "carol applies p2" "$escrow" apply "$p2" --key carol
 check "apply after drift reverted" [ "$(cat ws/two)" = two ]
 
 # -- not proposable -------------------------------------------------------
@@ -197,8 +216,8 @@ ssha=$(sha256sum "state/runs/$evil/$seq-propose.sig" | cut -d' ' -f1)
 roles_sha=$(sha256sum roles | cut -d' ' -f1)
 echo "$seq 2026-01-01T00:00:00Z propose $evil alice $rsha $ssha - $roles_sha $prev" \
   >>state/log
-"$escrow" review "$evil" --key bob >/dev/null 2>&1
-"$escrow" sign "$evil" --key carol >/dev/null 2>&1
+must "bob reviews the crafted proposal" "$escrow" review "$evil" --key bob
+must "carol signs the crafted proposal" "$escrow" sign "$evil" --key carol
 before=$(snapshot ws)
 refused "crafted link/x: apply refused" "apply f link/x" \
   "$escrow" apply "$evil" --key carol
@@ -210,6 +229,27 @@ cp bad.changes "state/runs/$evil/changes"
 refused "change set with .. refused" "bad path\|not the change set" \
   "$escrow" review "$evil"
 cp evil.changes "state/runs/$evil/changes"
+
+# A requester re-signs her own record with terminal escapes in cmd: the
+# record parser must refuse it before review prints anything.
+evil2=EviL02
+mkdir "state/runs/$evil2"
+cp "state/runs/$evil/changes" "state/runs/$evil2/changes"
+sed -e "s/^id .*/id $evil2/" -e "s/^cmd .*/cmd $(printf '\033]0;OWNED\007')/" \
+  "state/runs/$evil/record" >"state/runs/$evil2/record"
+seq=$(($(wc -l <state/log) + 1))
+ssh-keygen -q -Y sign -f alice -n escrow-propose \
+  <"state/runs/$evil2/record" >"state/runs/$evil2/$seq-propose.sig"
+prev=$(tail -n1 state/log | sha256sum | cut -d' ' -f1)
+rsha=$(sha256sum "state/runs/$evil2/record" | cut -d' ' -f1)
+ssha=$(sha256sum "state/runs/$evil2/$seq-propose.sig" | cut -d' ' -f1)
+echo "$seq 2026-01-01T00:00:00Z propose $evil2 alice $rsha $ssha - $roles_sha $prev" \
+  >>state/log
+refused "escape bytes in a signed record refused" "control or non-ASCII" \
+  "$escrow" review "$evil2"
+refused "list refuses it too" "control or non-ASCII" "$escrow" list
+refused "verify-log refuses it too" "control or non-ASCII" "$escrow" verify-log
+head -n -1 state/log >log.tmp && cat log.tmp >state/log
 
 check "verify-log still ok" sh -c '"$1" verify-log >/dev/null' _ "$escrow"
 
