@@ -59,7 +59,7 @@ step "alice can't approve her own change"
 run "$escrow" review "$id" --key "$d/alice" >/dev/null || true
 
 step "bob reviews: file diff + what it changes in the system"
-run "$escrow" review "$id" --key "$d/bob"
+run "$escrow" review "$id" --key "$d/bob" --closures
 
 step "carol signs and applies"
 run "$escrow" sign "$id" --key "$d/carol" >/dev/null
@@ -74,7 +74,8 @@ step "rewriting history is caught"
 mkdir "$d/forged"
 cp "$d/state/log" "$d/forged/log"
 ln -s "$d/state/runs" "$d/forged/runs"
-sed -i '2s/ bob / mallory /' "$d/forged/log"
+# Change one character of line 2 (its time): line 3's prev no longer matches.
+sed -i '2s/T/X/' "$d/forged/log"
 ESCROW_STATE=$d/forged run "$escrow" verify-log || true
 
 printf '\nstate kept in %s\n' "$d"
