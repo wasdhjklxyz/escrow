@@ -14,6 +14,8 @@ struct propose {
   const struct policy *policy;
   const char *ws;
   char *const *argv;
+  bool net;              // --net
+  char *const *pass_env; // --env names, nullptr-terminated
 };
 
 // After the run and the diff walk: writes <run>/record, has the requester

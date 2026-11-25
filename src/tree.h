@@ -14,4 +14,10 @@
 // pinned. Exits with status 1 on other failures.
 bool tree_hash(const char *dir, char hex[SHA256_HEX + 1]);
 
+// scandirat filter and order for walk order: no "." or "..", names by
+// strcmp (not strcoll: the hash can't depend on the locale).
+struct dirent;
+int tree_skip_dots(const struct dirent *d);
+int tree_by_name(const struct dirent **a, const struct dirent **b);
+
 #endif

@@ -25,8 +25,10 @@
       "NAME]\n"
       "              [--workspace DIR] [--state DIR] -- <cmd> [args...]\n"
       "       escrow list [--state DIR]\n"
-      "       escrow review <id> [--key KEY] [--state DIR] [--roles FILE]\n"
-      "       escrow sign <id> --key KEY [--state DIR] [--roles FILE]\n"
+      "       escrow review <id> [--key KEY] [--closures] [--state DIR] "
+      "[--roles FILE]\n"
+      "       escrow sign <id> --key KEY [--closures] [--state DIR] [--roles "
+      "FILE]\n"
       "       escrow apply <id> --key KEY [--state DIR] [--roles FILE]\n"
       "       escrow verify-log [--state DIR] [--roles FILE]\n"
       "  --role POLICY    role policy file (nix build .#role-<name>)\n"
@@ -104,10 +106,19 @@ int main(int argc, char *argv[]) {
     case 'e':
       if (npass == sizeof pass_env / sizeof *pass_env - 1)
         errx(2, "at most %zu --env", npass);
-      if (strspn(optarg, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-                         "0123456789_") != strlen(optarg) ||
-          !*optarg)
+      if (!*optarg ||
+          strspn(optarg, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                         "0123456789_") != strlen(optarg))
         errx(2, "--env takes a variable name, got %s", optarg);
+      // The jail sets these itself; a second copy would win in some shells.
+      for (const char *const *r =
+               (const char *const[]){"PATH", "HOME", "PWD", "TERM", "LANG",
+                                     "SSL_CERT_FILE", nullptr};
+           *r; r++)
+        if (strcmp(optarg, *r) == 0)
+          errx(2, "--env %s: escrow sets that one itself", optarg);
+      if (!getenv(optarg))
+        warnx("--env %s: not set here, so the agent won't get it", optarg);
       pass_env[npass++] = optarg;
       break;
     case 'w':
@@ -173,7 +184,9 @@ int main(int argc, char *argv[]) {
                         .role_file = role,
                         .policy = &policy,
                         .ws = wsreal,
-                        .argv = &argv[optind]};
+                        .argv = &argv[optind],
+                        .net = j.net,
+                        .pass_env = pass_env};
     propose(&p, &run, exit_status, base);
   } else if (key) {
     return 1;

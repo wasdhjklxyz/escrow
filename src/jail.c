@@ -303,9 +303,6 @@ out:
   return r;
 }
 
-// Clean env: nothing from the host but TERM and LANG, so host tokens
-// (GITHUB_TOKEN, AWS_*, SSH_AUTH_SOCK) don't reach the agent. execvp
-// searches the PATH of environ, so swap environ itself.
 // The first NAME=value in environ, or nullptr (getenv, but the whole entry).
 static char *env_entry(const char *name) {
   size_t n = strlen(name);
@@ -315,6 +312,11 @@ static char *env_entry(const char *name) {
   return nullptr;
 }
 
+// Clean env: PATH (the role's env/bin), HOME=/tmp, PWD=/work,
+// SSL_CERT_FILE if the role ships cacert, TERM and LANG, and the --env
+// names the operator chose. Nothing else from the host, so its tokens
+// (GITHUB_TOKEN, AWS_*, SSH_AUTH_SOCK) stay out. execvp searches the PATH
+// of environ, so environ itself is swapped.
 static int clean_environ(const char *env, char *const pass[]) {
   static const char *const keep[] = {"TERM", "LANG"};
   static char path[PATH_MAX], certs[PATH_MAX];
@@ -322,7 +324,9 @@ static int clean_environ(const char *env, char *const pass[]) {
 
   while (pass && pass[npass])
     npass++;
-  char **envp = calloc(5 + sizeof keep / sizeof *keep + npass, sizeof *envp);
+  // PATH, HOME, PWD, SSL_CERT_FILE, the kept ones, --env ones, nullptr.
+  char **envp =
+      calloc(4 + sizeof keep / sizeof *keep + npass + 1, sizeof *envp);
   if (!envp) {
     warn("calloc");
     return -1;

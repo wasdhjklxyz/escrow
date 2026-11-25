@@ -54,8 +54,10 @@ void record_write(const char *path, const struct record *r,
     fprintf(f, " %s", q);
     free(q);
   }
-  fprintf(f, "\nexit %d\nescrow %s\nrole-policy %s\nrole-env %s\n", r->exit,
-          r->escrow, r->role_policy, r->role_env);
+  fprintf(f,
+          "\nexit %d\nnet %d\nenv %s\nescrow %s\nrole-policy %s\nrole-env %s\n",
+          r->exit, r->net, r->env && *r->env ? r->env : "-", r->escrow,
+          r->role_policy, r->role_env);
   for (size_t i = 0; i < r->nstore; i++)
     fprintf(f, "store %s\n", r->store[i]);
   fprintf(f, "roles %s\nbase %s\nchanges %s\n", r->roles, r->base, r->changes);
@@ -78,8 +80,8 @@ static bool hex64(const char *s) {
 
 void record_read(const char *path, struct record *r) {
   static const char *const order[] = {
-      "escrow-record", "id",     "time",        "workspace", "cmd",
-      "exit",          "escrow", "role-policy", "role-env"};
+      "escrow-record", "id",  "time",   "workspace",   "cmd",     "exit",
+      "net",           "env", "escrow", "role-policy", "role-env"};
   char *buf = nullptr;
   size_t cap = 0, line = 0;
   ssize_t len;
@@ -146,15 +148,29 @@ void record_read(const char *path, struct record *r) {
       continue;
     }
     case 6:
-      r->escrow = dup;
+      if (strcmp(v, "0") != 0 && strcmp(v, "1") != 0)
+        errx(1, "%s: bad net", path);
+      r->net = v[0] == '1';
+      free(dup);
       continue;
     case 7:
+      // "-" or variable names, one space apart (validated by main.c).
+      if (strspn(v, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                    "0123456789_ -") != strlen(v) ||
+          !*v)
+        errx(1, "%s: bad env", path);
+      r->env = dup;
+      continue;
+    case 8:
+      r->escrow = dup;
+      continue;
+    case 9:
       if (!hex64(v))
         errx(1, "%s: bad role-policy", path);
       strcpy(r->role_policy, v);
       free(dup);
       continue;
-    case 8:
+    case 10:
       r->role_env = dup;
       tail = STORE;
       continue;
@@ -192,6 +208,7 @@ void record_read(const char *path, struct record *r) {
 void record_free(struct record *r) {
   free(r->workspace);
   free(r->cmd);
+  free(r->env);
   free(r->escrow);
   free(r->role_env);
   for (size_t i = 0; i < r->nstore; i++)

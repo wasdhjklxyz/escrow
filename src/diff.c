@@ -438,7 +438,7 @@ static void walk_dir(int ufd, const char *name, mode_t mode, int lfd, char tag,
   if (!tag && lfd >= 0 && xattrs_differ(fd, lfd))
     tag = 'M';
   if (tag)
-    emit(tag, S_IFDIR, -1, name, fd);
+    emit(tag, mode, -1, name, fd); // mode: as the agent left it, pre-relax
   walk(fd, lfd, opaque || is_opaque(fd), descend(len));
   path[len] = '\0';
   if (close(fd) < 0 || (lfd >= 0 && close(lfd) < 0))
