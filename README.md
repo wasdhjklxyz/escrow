@@ -2,24 +2,31 @@
 
 **Agents propose, humans sign.** escrow runs a command (usually an AI agent)
 in a throwaway, Nix-pinned Linux jail. Its file changes come out as a
-proposal. A requester signs it, a different person reviews it, a third
-signs it, and only then does it touch the real workspace. Every step is an
-SSH signature in a hash-chained log that an auditor can verify offline.
+proposal: the requester signs it, a reviewer signs off on it, a third
+person (the signer) approves it, and only then does it touch the real
+workspace. Every step is an SSH signature in a hash-chained log that an
+auditor can verify offline.
 
-Built for organizations: separation of duties is enforced, approvals are
-signed artifacts, the record pins the Nix closure the agent ran with, and
-when the workspace is a NixOS config, review shows what the approval
-changes in the *system* (`nix store diff-closures`), not just the files.
+Built for organizations: separation of duties (requester != reviewer !=
+signer) is enforced, approvals are signed artifacts, the record pins the
+Nix closure the agent ran with, and when the workspace is a NixOS config,
+review can show what the approval changes in the *system*
+(`nix store diff-closures`), not just the files.
 
 The design, threat model and limitations: [`docs/WRITEUP.md`](docs/WRITEUP.md).
 The on-disk formats: [`docs/FORMATS.md`](docs/FORMATS.md).
 
 ## Requirements
 
-Linux ≥ 6.8 with unprivileged user namespaces and Landlock, run as a
-normal user (escrow refuses root). `--net` needs Landlock ABI ≥ 10.
-Nix with flakes. On Ubuntu 24.04:
+Linux >= 6.8 with unprivileged user namespaces and Landlock, run as a
+normal user (escrow refuses root). `--net` needs Landlock ABI >= 10.
+Nix with flakes, its build sandbox on (the default). On Ubuntu 24.04:
 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`.
+
+The demo builds a small NixOS system (x86_64-linux) on first run: it
+needs network and a few minutes. `--claude` also needs ANTHROPIC_API_KEY
+in the environment and Landlock ABI >= 10 (escrow prints yours if not).
+The escrow binary is `build/bin/escrow` (or `nix build` and `result/bin`).
 
 ## Try it
 
@@ -46,7 +53,8 @@ export ESCROW_STATE=$PWD/state ESCROW_ROLES=$PWD/roles
 
 escrow --role role --key alice --workspace ./config -- ops-ticket   # propose
 escrow list
-escrow review <id> --key bob      # file diff + closure diff; bob signs
+escrow review <id> --key bob      # what apply will write; bob signs
+escrow review <id> --closures     # + nix store diff-closures (builds on this host)
 escrow sign <id> --key carol      # a third person approves
 escrow apply <id> --key carol     # atomic, refuses if the workspace moved
 escrow verify-log                 # offline: chain, signatures, SoD

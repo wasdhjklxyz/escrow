@@ -19,10 +19,11 @@ make it an organizational tool rather than a single-developer one:
 
 1. **Separation of duties, enforced.** Requester, reviewer and signer are
    three different people (three distinct principals, so three distinct
-   keys). A requester can never review or sign her own proposal, and a
+   keys). A requester can never review or sign their own proposal, and a
    reviewer can't also sign it. The tool refuses; it isn't a convention.
 2. **Signed decisions.** Every step is an SSH signature (`ssh-keygen -Y`)
-   in its own namespace, over the exact bytes of the proposal record. An
+   in its own namespace, over the exact bytes of the proposal record (apply
+   signs a statement naming that record and the tree it produced). An
    auditor verifies the whole history offline with `ssh-keygen` and
    `sha256sum`.
 3. **Nix provenance.** The agent can only execute what is in its role's
@@ -30,8 +31,10 @@ make it an organizational tool rather than a single-developer one:
    noexec and memfd exec is blocked, so store paths are the only
    executable files.
 4. **Diff systems, not just repos.** When the workspace is a NixOS flake,
-   review shows the file diff *and* `nix store diff-closures`: which
-   packages and services the approval actually changes.
+   `review --closures` adds `nix store diff-closures` to the file diff:
+   the package-level changes the approval makes to the running system.
+   It is advisory (names come from the evaluated Nix, and it is not
+   signed); the file diff is what gets applied.
 
 ## Prior art
 
@@ -43,7 +46,7 @@ make it an organizational tool rather than a single-developer one:
 | **escrow** | requester | reviewer | SSH signatures, offline-verifiable | enforced | `nix store diff-closures` |
 
 These are good sandboxes, built for one developer reviewing their own
-agent's work (as described in their own materials at the time of writing).
+agent's work (as described in their own materials, November 2026).
 escrow's jail is deliberately conventional; the new part is everything
 after the agent exits.
 
@@ -60,7 +63,8 @@ escrow --role POLICY --key KEY --workspace W -- <agent ...>
              to <run>/log, NO_NEW_PRIVS, Landlock, seccomp, exec
   after the agent: the overlay upper dir is the change set
     diff walk -> frozen <run>/changes (payloads included)
-    record (base tree hash, change-set hash, roles hash, closure) -> requester signs
+    record (base tree hash, change-set hash, roles hash, closure, --net,
+            --env names) -> requester signs
 escrow review <id> --key BOB    # rendered from the change set; bob signs
 escrow sign   <id> --key CAROL  # carol, a third principal, signs
 escrow apply  <id> --key CAROL  # stage a copy, re-check base, apply, swap atomically
@@ -86,7 +90,7 @@ signing), and the audit trail.
   binaries outside its closure (noexec, memfd blocked), or inject into the
   review (its output never shares the diff's stream; every path, link
   target, record field and file content shown is escaped).
-- *A malicious requester* holds her own key and can hand-craft run
+- *A malicious requester* holds their own key and can hand-craft run
   directories, records, change sets, even append log lines. Separation of
   duties still holds because review and sign need other people's keys;
   apply re-verifies everything from signatures and writes only through an
@@ -98,6 +102,12 @@ signing), and the audit trail.
 - **Exfiltration through allowed channels.** With `--net`, anything the
   agent can read (the workspace) can leave through TCP 443 or DNS. No
   kernel jail can tell a legitimate API call from a leak.
+- **Review-time Nix (`--closures`).** Building the closure diff evaluates
+  and builds Nix the agent wrote, on the reviewer's host. escrow refuses
+  fixed-output builds (the ones with network), points eval-time fetches at
+  a dead proxy, and requires Nix's build sandbox, but an ssh git URL or
+  its DNS lookup could still carry data out, and `path:` copies the
+  workspace into the world-readable Nix store. That is why it is opt-in.
 - **Kernel bugs.** escrow reduces attack surface (no nested user ns,
   seccomp, Landlock) but runs on the host kernel.
 - **Interpreted code.** Store paths are the only executable *files*; an
@@ -131,6 +141,16 @@ signing), and the audit trail.
   flight recorder for blast-radius analysis.
 - **Capabilities.** Per-tool, per-path grants instead of one closure per
   role.
+
+## Prior and new work
+
+The jail is built from standard Linux mechanisms (user, mount and pid
+namespaces, overlayfs, pivot_root, Landlock, seccomp) in the same way
+bubblewrap, container runtimes and the sandboxes above use them; escrow
+implements them directly in C with no dependencies beyond libc. New here:
+the frozen, signed change set; enforced separation of duties; the
+offline-verifiable hash-chained log; the attested Nix closure; and
+system-level review through the closure diff.
 
 ## AI usage
 
