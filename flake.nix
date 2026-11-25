@@ -87,6 +87,48 @@
               self.packages.${system}.tests
             ];
           };
+
+          # The demo's scripted ops agent (demo/agent/ops-ticket.sh).
+          role-demo = self.lib.mkRole pkgs {
+            name = "demo";
+            tools = with pkgs; [
+              bash
+              coreutils
+              gnused
+              (writeShellApplication {
+                name = "ops-ticket";
+                runtimeInputs = [
+                  coreutils
+                  gnused
+                ];
+                text = builtins.readFile ./demo/agent/ops-ticket.sh;
+              })
+            ];
+          };
+
+          # A real coding agent: Claude Code, run with --net and
+          # --env ANTHROPIC_API_KEY. Unfree, so only that package is allowed.
+          role-claude =
+            let
+              unfree = import nixpkgs {
+                inherit system;
+                config.allowUnfreePredicate = p: pkgs.lib.getName p == "claude-code";
+              };
+            in
+            self.lib.mkRole pkgs {
+              name = "claude";
+              tools = with pkgs; [
+                bash
+                cacert
+                coreutils
+                diffutils
+                findutils
+                git
+                gnugrep
+                gnused
+                unfree.claude-code
+              ];
+            };
         }
       );
 
