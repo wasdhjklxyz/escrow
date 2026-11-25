@@ -18,7 +18,7 @@
       "usage: escrow --role POLICY [--net] [--workspace DIR] [--state DIR]"
       " -- <cmd> [args...]\n"
       "  --role POLICY    role policy file (nix build .#role-<name>)\n"
-      "  --net            share the host network (TCP connect to 443 only)\n"
+      "  --net            share the host network (TCP 443 and DNS only)\n"
       "  --workspace DIR  directory the command sees as /work (default: .)\n"
       "  --state DIR      where runs are kept (default: $ESCROW_STATE)\n"
       "exit: the command's status (128+N if killed by signal N),\n"
@@ -38,7 +38,8 @@ int main(int argc, char *argv[]) {
   const char *state = getenv("ESCROW_STATE");
   const char *role = nullptr;
   char wsreal[PATH_MAX];
-  struct policy policy;
+  // static: reachable at exit, so LeakSanitizer doesn't flag it.
+  static struct policy policy;
   struct run run;
   struct jail j = {.run = &run, .ws = wsreal, .policy = &policy};
   int c;
@@ -71,11 +72,13 @@ int main(int argc, char *argv[]) {
   // root in its ns and keep every cap.
   if (getuid() == 0 || geteuid() == 0)
     errx(1, "refusing to run as root");
-  // Fail closed: under --net only Landlock keeps the agent off localhost
-  // ports and the host's abstract unix sockets (dbus, X11).
-  j.abi = landlock_abi();
-  if (j.net && j.abi < 6)
-    errx(1, "--net needs Landlock ABI >= 6 (kernel >= 6.12), have %d", j.abi);
+  // Fail closed: under --net only Landlock (with seccomp keeping sockets
+  // to plain TCP/UDP) keeps the agent off other ports and the host's
+  // abstract unix sockets (dbus, X11).
+  j.landlock_abi = landlock_abi();
+  if (j.net && j.landlock_abi < 10)
+    errx(1, "--net needs Landlock ABI >= 10 (TCP and UDP port rules), have %d",
+         j.landlock_abi);
   if (!realpath(ws, wsreal))
     err(1, "realpath %s", ws);
   policy_load(&policy, role);
@@ -83,6 +86,7 @@ int main(int argc, char *argv[]) {
   overlay_prepare(&run, state, wsreal);
   warnx("run dir: %s", run.dir);
   int status = jail_run(&j, &argv[optind]);
+  warnx("agent output: %s", run.log);
   if (!diff_print(&run, wsreal))
     warnx("some entries could not be compared (marked ?)");
 

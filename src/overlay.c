@@ -89,6 +89,7 @@ void overlay_prepare(struct run *run, const char *state, const char *ws) {
   mkdir_new(run->dir, "upper", run->upper);
   mkdir_new(run->dir, "work", run->work);
   mkdir_new(run->dir, "root", run->root);
+  join(run->dir, "log", run->log);
 
   // The overlay root takes its attributes from upper's root. Match the
   // workspace root so the agent sees the right mode and the diff can
@@ -146,10 +147,11 @@ int overlay_mount(const struct run *run, const char *ws, int dirfd,
     goto fail;
   }
 
-  // Defense in depth: a userns-owned superblock is already nodev, and
-  // nosuid keeps set-id bits in the workspace from meaning anything.
-  int mfd =
-      fsmount(fsfd, FSMOUNT_CLOEXEC, MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV);
+  // A userns-owned superblock is already nodev, and nosuid keeps set-id
+  // bits in the workspace from meaning anything. noexec: only store paths
+  // run, so the record's store hashes cover every binary.
+  int mfd = fsmount(fsfd, FSMOUNT_CLOEXEC,
+                    MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC);
   if (mfd < 0) {
     warn("fsmount");
     goto fail;
