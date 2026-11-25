@@ -1,8 +1,6 @@
 #include "diff.h"
 
-#include "changes.h"
 #include "overlay.h"
-#include "record.h"
 
 #include <dirent.h>
 #include <err.h>
@@ -27,7 +25,7 @@ enum lookup { LOOKUP_ABSENT, LOOKUP_PRESENT, LOOKUP_UNREADABLE };
 // Result of comparing an upper entry with its lower counterpart.
 enum cmp { CMP_SAME, CMP_CHANGED, CMP_UNREADABLE };
 
-// Worst case for record_quote(): every byte becomes \ooo, plus quotes and NUL.
+// Worst case for quote(): every byte becomes \ooo, plus quotes and NUL.
 enum { QUOTE_MAX = 4 * PATH_MAX + 3 };
 
 // Kernel cap on one xattr value and on a name list (XATTR_SIZE_MAX,
@@ -38,8 +36,6 @@ enum { XATTR_BUF = 1 << 16 };
 // push(), and a directory's prefix ends in '/'.
 static char path[PATH_MAX];
 static bool complete = true;
-// If set, every diff line also goes into the change set.
-static struct changes_writer *changes;
 
 // The agent may chmod upper entries so we (the same uid, without its
 // in-ns capabilities) can't read them. The walk adds u+r(x) and restores
@@ -57,17 +53,41 @@ struct relax_entry {
 };
 static struct relax_entry *relaxed_head;
 
-// Paths, targets and xattr names go through record_quote() (record.h):
-// control bytes, space, '"', '\' and non-ASCII (bidi overrides included)
-// force quoting, so an unquoted path never contains a space and the
-// " (fifo)" and " -> target" suffixes are unambiguous. None of them is
-// ever empty here.
+// Copies s to out, C-quoted if it holds any byte that could forge or hide
+// a line on a terminal or for a line parser: control bytes, space, '"',
+// '\', and non-ASCII (which includes bidi overrides). An unquoted path
+// therefore never contains a space, so the " (fifo)" and " -> target"
+// suffixes are unambiguous.
+static void quote(char out[QUOTE_MAX], const char *s) {
+  const unsigned char *p;
+
+  for (p = (const unsigned char *)s; *p; p++)
+    if (*p <= ' ' || *p >= 0x7f || *p == '"' || *p == '\\')
+      break;
+  if (!*p) {
+    strcpy(out, s);
+    return;
+  }
+  *out++ = '"';
+  for (p = (const unsigned char *)s; *p; p++) {
+    if (*p == '"' || *p == '\\') {
+      *out++ = '\\';
+      *out++ = *p;
+    } else if (*p < ' ' || *p >= 0x7f) {
+      out += sprintf(out, "\\%03o", *p);
+    } else {
+      *out++ = *p;
+    }
+  }
+  *out++ = '"';
+  *out = '\0';
+}
 
 // The current path, quoted, for error messages.
 static const char *where(void) {
   static char buf[QUOTE_MAX];
 
-  record_quote(buf, path[0] ? path : ".");
+  quote(buf, path[0] ? path : ".");
   return buf;
 }
 
@@ -192,7 +212,7 @@ static void print_xattrs(int fd) {
   for (const char *p = names; p < names + n; p += strlen(p) + 1) {
     if (is_overlay_xattr(p))
       continue;
-    record_quote(q, p);
+    quote(q, p);
     printf("%s%s", first ? " xattrs: " : " ", q);
     first = false;
   }
@@ -207,14 +227,14 @@ static void emit(char tag, mode_t mode, int dirfd, const char *name, int xfd) {
   size_t len = strlen(path);
 
   if (len == 0) {
-    record_quote(q, "./");
+    quote(q, "./");
   } else if (S_ISDIR(mode)) {
     path[len] = '/'; // push() left room
     path[len + 1] = '\0';
-    record_quote(q, path);
+    quote(q, path);
     path[len] = '\0';
   } else {
-    record_quote(q, path);
+    quote(q, path);
   }
 
   if (S_ISLNK(mode) && dirfd >= 0) {
@@ -226,7 +246,7 @@ static void emit(char tag, mode_t mode, int dirfd, const char *name, int xfd) {
       errx(1, "symlink target too long: %s", where());
     target[n] = '\0';
     printf("%c %s -> ", tag, q);
-    record_quote(q, target);
+    quote(q, target);
     printf("%s", q);
   } else {
     printf("%c %s%s", tag, q, type_suffix(mode));
@@ -236,8 +256,6 @@ static void emit(char tag, mode_t mode, int dirfd, const char *name, int xfd) {
   putchar('\n');
   if (tag == '?')
     complete = false;
-  if (changes)
-    changes_emit(changes, tag, mode, path, dirfd, name, xfd);
 }
 
 static bool is_whiteout(const struct stat *st) {
@@ -554,11 +572,8 @@ static void walk(int ufd, int lfd, bool opaque, size_t len) {
     free_list(l, nl);
 }
 
-bool diff_print(const struct run *run, const char *ws,
-                struct changes_writer *w) {
+bool diff_print(const struct run *run, const char *ws) {
   struct stat u, l;
-
-  changes = w;
 
   if (atexit(restore_all) != 0)
     errx(1, "atexit");

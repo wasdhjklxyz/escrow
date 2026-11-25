@@ -42,21 +42,7 @@
             pname = "escrow";
             version = "0.1.0";
             src = self;
-            nativeBuildInputs = with pkgs; [
-              cmake
-              makeWrapper
-            ];
-            # escrow implements no crypto: sha256sum, ssh-keygen and diff run
-            # as helpers, pinned here rather than taken from the caller's PATH.
-            postFixup = ''
-              wrapProgram $out/bin/escrow --prefix PATH : ${
-                pkgs.lib.makeBinPath [
-                  pkgs.coreutils
-                  pkgs.diffutils
-                  pkgs.openssh
-                ]
-              }
-            '';
+            nativeBuildInputs = with pkgs; [ cmake ];
             meta.platforms = pkgs.lib.platforms.linux;
           };
 
@@ -82,7 +68,6 @@
               coreutils
               findutils
               gnugrep
-              gnused
               util-linux
               self.packages.${system}.tests
             ];
@@ -101,8 +86,6 @@
             packages = with pkgs; [
               attr
               clang-tools
-              diffutils
-              openssh
             ];
             inputsFrom = [ self.packages.${system}.default ];
             shellHook = ''

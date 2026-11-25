@@ -2,7 +2,6 @@
 #define ESCROW_DIFF_H
 
 struct run;
-struct changes_writer;
 
 // Prints what run->upper changes relative to the workspace ws, one line per
 // entry on stdout, sorted by strcmp within each directory:
@@ -27,9 +26,7 @@ struct changes_writer;
 // Run from the host ns after every agent process is dead. Locked upper
 // entries get u+r/u+rx for the walk and their modes are restored before
 // return. Exits with status 1 on host-side errors. Call once per process
-// (file-static state). Returns false if any '?' line was printed. If w is
-// set, each line also goes to the change set (see changes.h).
-bool diff_print(const struct run *run, const char *ws,
-                struct changes_writer *w);
+// (file-static state). Returns false if any '?' line was printed.
+bool diff_print(const struct run *run, const char *ws);
 
 #endif
