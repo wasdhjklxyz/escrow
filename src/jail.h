@@ -2,16 +2,28 @@
 #define ESCROW_JAIL_H
 
 struct run;
+struct policy;
 
-// Runs argv[0] with cwd at run->merged, in a forked child that enters a new
-// user+mount ns and mounts the overlay. The caller never leaves the host
-// namespaces. Returns the child's wait status (exit 125: setup failed,
-// 127: exec failed) after killing and reaping every process left in the
-// child's tree. In M1 that is the guarantee: the agent runs as our uid
-// with the host fs visible, so it can still start a process outside its
-// tree (systemd-run --user, a tmux server) that writes to upper/ later.
-// M2's pid ns and pivot_root close that. Exits with status 1 on host-side
+// What the agent gets. ws must be realpath() output.
+struct jail {
+  const struct run *run;
+  const char *ws;
+  const struct policy *policy;
+  bool net; // share the host net ns (Landlock: TCP connect to 443 only)
+  int abi;  // landlock_abi()
+};
+
+// Runs argv[0] (looked up in the role's env/bin) in a jail: clone3 into a
+// new user, mount, pid and (unless j->net) net ns. The child is PID 1, our
+// own init: it builds a root of the policy's store paths, the overlay at
+// /work, tmpfs /tmp, minimal /dev and a fresh /proc, pivots into it, then
+// forks the agent with no caps, a clean env, no controlling tty and
+// Landlock. The caller never leaves the host namespaces. Returns init's
+// wait status: init exits with the agent's status (128+N if the agent was
+// killed by signal N), 125 if setup failed, 127 if exec failed. When it
+// returns, every jailed process is dead: init's exit kills the pid ns and
+// doesn't complete until the ns is empty. Exits with status 1 on host-side
 // failures.
-int jail_run(const struct run *run, const char *ws, char *const argv[]);
+int jail_run(const struct jail *j, char *const argv[]);
 
 #endif
