@@ -12,9 +12,10 @@ struct overlay {
   char merged[PATH_MAX]; /* run/merged: mount point */
 };
 
-/* Parent, host ns. Resolves the workspace, creates the run dir, refuses
+/* Parent, host ns. Resolves the workspace, creates <state>/runs/<id>, refuses
  * overlap between the two. Exits on failure. */
-void overlay_prepare(struct overlay *ov, const char *workspace);
+void overlay_prepare(struct overlay *ov, const char *workspace,
+                     const char *state);
 
 /* Child, inside the new user+mount ns. Mounts the overlay on ov->merged.
  * Returns -1 (context already printed) on failure. */

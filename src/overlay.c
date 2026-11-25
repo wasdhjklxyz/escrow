@@ -84,17 +84,19 @@ static void mkdir_p(const char *path) {
   }
 }
 
-static void state_base(char out[PATH_MAX]) {
-  /* XDG: a relative XDG_STATE_HOME is invalid and must be ignored. */
-  const char *xdg = getenv("XDG_STATE_HOME");
-  if (xdg != NULL && xdg[0] == '/') {
-    join(out, xdg, "escrow/runs");
-    return;
+/* <state>/runs, made absolute against cwd (resolve_missing needs that). */
+static void runs_dir(char out[PATH_MAX], const char *state) {
+  char abs[PATH_MAX];
+  if (state[0] == '/') {
+    if (snprintf(abs, sizeof abs, "%s", state) >= (int)sizeof abs)
+      errx(1, "path too long: %s", state);
+  } else {
+    char cwd[PATH_MAX];
+    if (getcwd(cwd, sizeof cwd) == NULL)
+      err(1, "getcwd");
+    join(abs, cwd, state);
   }
-  const char *home = getenv("HOME");
-  if (home == NULL || home[0] != '/')
-    errx(1, "neither XDG_STATE_HOME nor HOME is an absolute path");
-  join(out, home, ".local/state/escrow/runs");
+  join(out, abs, "runs");
 }
 
 static void check_overlap(const char *run, const char *ws) {
@@ -104,7 +106,8 @@ static void check_overlap(const char *run, const char *ws) {
     errx(1, "workspace %s is inside state dir %s", ws, run);
 }
 
-void overlay_prepare(struct overlay *ov, const char *workspace) {
+void overlay_prepare(struct overlay *ov, const char *workspace,
+                     const char *state) {
   if (realpath(workspace, ov->lower) == NULL)
     err(1, "realpath %s", workspace);
   struct stat st;
@@ -116,7 +119,7 @@ void overlay_prepare(struct overlay *ov, const char *workspace) {
   /* Check before creating anything, so a bad state path can't write into
    * the workspace. */
   char base[PATH_MAX], runs[PATH_MAX];
-  state_base(base);
+  runs_dir(base, state);
   resolve_missing(base, runs);
   check_overlap(runs, ov->lower);
   mkdir_p(runs);
