@@ -41,3 +41,24 @@
   hold N signatures now. Later, a host-side score from the built closure
   diff (setuid, services, firewall, caps) can only raise the signer count
   above the policy minimum, never lower it.
+- **Witnessed log heads (later, M5 "where this goes").** Independent
+  witnesses cosign `(seq, head)` so truncation or a rewrite shows up offline.
+  The log is a linear chain, not a Merkle tree: a witness keeps the whole log
+  to check that the new head extends the old one.
+- **Inverse change set on apply (later).** Before removing the old tree,
+  write the change set that undoes the apply. Revert is a normal proposal
+  (review, sign, base check), never an automatic or unsigned rollback.
+- **Warrant before the run (later, M5 "where this goes").** A signer
+  pre-signs a scope (paths, later closure deltas) and the proposal is checked
+  against it. It can only reject, never replace review or signatures. Same
+  NixOS path weakness as path-scoped signer roles.
+- **Roles from an SSH CA (later, M5 "where this goes").** Short-lived role
+  certs and a KRL replace the static roles file and fix rotation. Offline
+  audit verifies certs at the logged sign time (`-O verify-time`) and needs
+  the archived CA + KRL. sk-* key types are already allowed.
+- **Machine witness (later).** A CI key builds/tests the materialized
+  proposal inside the jail and adds a signature. It never counts toward
+  human SoD and is never the final signer.
+- **in-toto export (later, low).** Statement with subject = changes sha256,
+  materials = store paths. SSHSIG isn't DSSE, so stock verifiers need a
+  second signer (a dependency).
