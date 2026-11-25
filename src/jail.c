@@ -89,6 +89,14 @@ pid_t jail_spawn(const struct overlay *ov, char *const argv[]) {
   if (prctl(PR_SET_CHILD_SUBREAPER, 1) < 0)
     err(1, "prctl(PR_SET_CHILD_SUBREAPER)");
 
+  /* A launcher's SIGCHLD=SIG_IGN would auto-reap: waitpid then fails with
+   * ECHILD and reaped pids could be reused before kill_children. */
+  struct sigaction dfl = {.sa_handler = SIG_DFL};
+  if (sigemptyset(&dfl.sa_mask) < 0)
+    err(1, "sigemptyset");
+  if (sigaction(SIGCHLD, &dfl, NULL) < 0)
+    err(1, "sigaction SIGCHLD");
+
   if (fflush(NULL) == EOF)
     err(1, "fflush");
   pid_t pid = fork();
