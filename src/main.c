@@ -1,4 +1,3 @@
-#include <err.h>
 #include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,9 +39,6 @@ int main(int argc, char *argv[]) {
 
   pid_t pid = jail_spawn(&ov, &argv[optind]);
   int status = jail_wait(pid);
-  if (status == JAIL_ESETUP)
-    warnx("sandbox setup failed; diff may be empty");
-
   diff_print(ov.upper, ov.lower, stdout);
   return status;
 }
