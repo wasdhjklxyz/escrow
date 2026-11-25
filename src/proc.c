@@ -71,19 +71,25 @@ void sha256_open(struct sha256 *h) {
   h->out = out[0];
 }
 
-void sha256_write(struct sha256 *h, const void *buf, size_t n) {
+int write_all(int fd, const void *buf, size_t n) {
   const char *p = buf;
 
   while (n > 0) {
-    ssize_t w = write(h->in, p, n);
+    ssize_t w = write(fd, p, n);
     if (w < 0) {
       if (errno == EINTR)
         continue;
-      err(1, "write sha256sum");
+      return -1;
     }
     p += w;
     n -= (size_t)w;
   }
+  return 0;
+}
+
+void sha256_write(struct sha256 *h, const void *buf, size_t n) {
+  if (write_all(h->in, buf, n) < 0)
+    err(1, "write sha256sum");
 }
 
 void sha256_close(struct sha256 *h, char hex[SHA256_HEX + 1]) {

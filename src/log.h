@@ -38,9 +38,15 @@ struct log {
   size_t n;
 };
 
-// Opens (creating) and locks the log, then parses every line. Malformed
-// lines exit with status 1. The chain itself is checked by log_verify.
-void log_open(struct log *l, const char *state);
+// Opens and locks the log, then parses every line. writer: create it if
+// needed, LOCK_EX (held until exit). Otherwise read-only, LOCK_SH, and a
+// missing log is an error. Malformed lines exit with status 1. The chain
+// itself is checked by cmd_verify_log.
+void log_open(struct log *l, const char *state, bool writer);
+
+// The hash the next line's prev must carry: of line n (1-based), or 64
+// zeros for n == 0.
+const char *log_hash_at(const struct log *l, size_t n);
 
 // Fills seq, time and prev, appends the line (fsync'd), and adds it to l.
 void log_append(struct log *l, struct log_line *line);

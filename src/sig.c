@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 static const char *const keytypes[] = {
@@ -17,13 +18,6 @@ static const char *const keytypes[] = {
     "sk-ecdsa-sha2-nistp256@openssh.com",
     "ssh-rsa",
 };
-
-static const char *allowed_file;
-
-static void unlink_allowed(void) {
-  if (allowed_file)
-    unlink(allowed_file);
-}
 
 const char *role_name(unsigned role) {
   return role == ROLE_REQUESTER  ? "requester"
@@ -63,16 +57,14 @@ void roles_load(struct roles *r, const char *file) {
   FILE *in = fopen(file, "re");
   if (!in)
     err(1, "open %s", file);
-  const char *tmpdir = getenv("TMPDIR");
-  snprintf(r->allowed, sizeof r->allowed, "%s/escrow-allowed-XXXXXX",
-           tmpdir && *tmpdir ? tmpdir : "/tmp");
-  int fd = mkstemp(r->allowed);
+  // ssh-keygen reads it by path: /proc/<escrow>/fd/N (same uid). An
+  // anonymous memfd leaves nothing behind, even after SIGKILL. escrow keeps
+  // it open until exit; CLOEXEC is fine, since helpers open it by path.
+  int fd = memfd_create("allowed_signers", MFD_CLOEXEC);
   if (fd < 0)
-    err(1, "mkstemp %s", r->allowed);
-  allowed_file = r->allowed;
-  if (atexit(unlink_allowed) != 0)
-    errx(1, "atexit");
-  FILE *out = fdopen(fd, "w");
+    err(1, "memfd_create");
+  snprintf(r->allowed, sizeof r->allowed, "/proc/%d/fd/%d", getpid(), fd);
+  FILE *out = fdopen(dup(fd), "w");
   if (!out)
     err(1, "fdopen");
 
@@ -128,7 +120,7 @@ void roles_load(struct roles *r, const char *file) {
   if (ferror(in) || fclose(in) == EOF)
     err(1, "read %s", file);
   if (fclose(out) == EOF)
-    err(1, "write %s", r->allowed);
+    err(1, "write allowed_signers");
   for (size_t i = 0; i < r->n; i++)
     free(keys[i]);
   free(keys);

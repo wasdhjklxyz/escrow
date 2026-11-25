@@ -16,6 +16,14 @@
 
 enum { ROLE_REQUESTER = 1, ROLE_REVIEWER = 2, ROLE_SIGNER = 4 };
 
+// Signature namespaces. propose, review and sign all sign the same record
+// bytes and differ only here, so one step's signature can't be replayed
+// as another's. apply signs the apply statement (cmd.c).
+#define NS_PROPOSE "escrow-propose"
+#define NS_REVIEW "escrow-review"
+#define NS_SIGN "escrow-sign"
+#define NS_APPLY "escrow-apply"
+
 struct principal {
   char *name;
   unsigned roles;
@@ -25,10 +33,10 @@ struct roles {
   struct principal *v;
   size_t n;
   char sha[SHA256_HEX + 1]; // of the roles file
-  char allowed[PATH_MAX]; // generated allowed_signers (temp, unlinked at exit)
+  char allowed[PATH_MAX];   // generated allowed_signers: /proc/<pid>/fd/<memfd>
 };
 
-// Exits with status 1 on any malformed line or failure.
+// Exits with status 1 on any malformed line or failure. Once per process.
 void roles_load(struct roles *r, const char *file);
 
 // The roles file from --roles or $ESCROW_ROLES; exits with status 2 if

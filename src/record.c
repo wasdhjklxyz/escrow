@@ -50,10 +50,7 @@ void record_write(const char *path, const struct record *r,
   fprintf(f, "escrow-record 1\nid %s\ntime %s\nworkspace %s\ncmd", r->id,
           r->time, r->workspace);
   for (char *const *a = argv; *a; a++) {
-    char *q = malloc(4 * strlen(*a) + 3);
-    if (!q)
-      err(1, "malloc");
-    record_quote(q, *a);
+    char *q = record_quoted(*a);
     fprintf(f, " %s", q);
     free(q);
   }
@@ -64,6 +61,15 @@ void record_write(const char *path, const struct record *r,
   fprintf(f, "roles %s\nbase %s\nchanges %s\n", r->roles, r->base, r->changes);
   if (fflush(f) == EOF || ferror(f) || fsync(fd) < 0 || fclose(f) == EOF)
     err(1, "write %s", path);
+}
+
+// Printable ASCII only: these fields are shown to the reviewer and signer,
+// and a requester can write (and re-sign) any record she likes.
+static bool printable(const char *s) {
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++)
+    if (*p < 0x20 || *p >= 0x7f)
+      return false;
+  return true;
 }
 
 static bool hex64(const char *s) {
@@ -89,6 +95,8 @@ void record_read(const char *path, struct record *r) {
     buf[--len] = '\0';
     if ((size_t)len != strlen(buf))
       errx(1, "%s:%zu: NUL byte", path, line + 1);
+    if (!printable(buf))
+      errx(1, "%s:%zu: control or non-ASCII byte", path, line + 1);
     char *sp = strchr(buf, ' ');
     if (!sp)
       errx(1, "%s:%zu: expected \"key value\"", path, line + 1);
@@ -121,7 +129,7 @@ void record_read(const char *path, struct record *r) {
       free(dup);
       continue;
     case 3:
-      if (v[0] != '/' || !record_plain(v))
+      if (v[0] != '/' || !record_plain(v) || v[strlen(v) - 1] == '/')
         errx(1, "%s: bad workspace", path);
       r->workspace = dup;
       continue;
@@ -190,4 +198,12 @@ void record_free(struct record *r) {
     free(r->store[i]);
   free(r->store);
   *r = (struct record){};
+}
+
+char *record_quoted(const char *s) {
+  char *q = malloc(4 * strlen(s) + 3);
+  if (!q)
+    err(1, "malloc");
+  record_quote(q, s);
+  return q;
 }

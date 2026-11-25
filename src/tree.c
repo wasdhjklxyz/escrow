@@ -13,8 +13,6 @@
 #include <sys/xattr.h>
 #include <unistd.h>
 
-enum { XATTR_BUF = 1 << 16 };
-
 static char path[PATH_MAX];
 
 // Every field is NUL-terminated or length-prefixed, so no path or payload
@@ -45,8 +43,8 @@ static int cmp_str(const void *a, const void *b) {
 // user.* xattrs, sorted by name. Others (security.*, trusted.*) can't be
 // set by apply anyway; the change set refuses them.
 static bool hash_xattrs(struct sha256 *h, int fd) {
-  static char names[XATTR_BUF], val[XATTR_BUF];
-  char *list[XATTR_BUF / 2];
+  static char names[XATTR_LIST_MAX], val[XATTR_SIZE_MAX];
+  static char *list[XATTR_LIST_MAX / 2];
   size_t n = 0;
 
   ssize_t len = flistxattr(fd, names, sizeof names);

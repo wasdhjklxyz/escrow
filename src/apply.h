@@ -3,15 +3,19 @@
 
 struct changeset;
 
-// Writes the change set into the tree at root, in order. Every path is
-// resolved with openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS |
-// RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV) from root, so no symlink or
-// mount inside the tree can redirect a write or a delete outside it.
-// d/f/l/p replace whatever is at the path (a dir in the way is removed
-// recursively, never crossing a mount); f/l/p land via a temp name and
-// renameat. Modes and user.* xattrs are set exactly (umask is ignored).
-// Returns 0, or -1 after printing the path that failed; the tree may then
-// be partly written, so callers apply to a staging copy. Never exits.
+// openat2(root, path) with RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS |
+// RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV: a symlink or a mount anywhere
+// on the path, or a ".." that climbs out, makes it fail. "" means root.
+// O_CLOEXEC is added. Returns the fd or -1 (errno set).
+int open_beneath(int root, const char *path, int flags);
+
+// Writes the change set into the tree at root, in order, every path
+// resolved through open_beneath(). d/f/l/p replace whatever is at the path
+// (a dir in the way is removed recursively, never crossing a mount). Modes
+// and user.* xattrs are set exactly, whatever the umask; dir modes go on
+// last, so a 0555 dir can still receive its children. Returns 0, or -1
+// after printing the path that failed, leaving the tree partly written:
+// callers apply to a staging copy. Never exits.
 int apply_changes(const struct changeset *cs, const char *root);
 
 #endif

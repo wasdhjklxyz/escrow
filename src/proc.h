@@ -14,6 +14,9 @@
 // it can't be spawned.
 int run_cmd(char *const argv[], int in_fd, int out_fd);
 
+// write(2) until all n bytes are out (EINTR retried). 0 or -1.
+int write_all(int fd, const void *buf, size_t n);
+
 // A running sha256sum fed through a pipe.
 struct sha256 {
   pid_t pid;

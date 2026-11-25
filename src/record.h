@@ -55,6 +55,8 @@ void record_free(struct record *r);
 // forge or hide text on a terminal become \ooo; "" for empty. out must
 // hold 4*strlen(s)+3 bytes.
 void record_quote(char *out, const char *s);
+// record_quote into a new buffer (free it); exits with status 1 on OOM.
+char *record_quoted(const char *s);
 // True if s would come out of record_quote unchanged (no quoting needed).
 bool record_plain(const char *s);
 

@@ -21,6 +21,9 @@
 // its children), so no path appears twice. Only user.* xattrs; no set-id
 // bits, no sticky bit except on dirs. d/f/l/p replace whatever is at the
 // path; D entries under an already deleted or replaced path are omitted.
+// Integers are canonical (octal mode, decimal lengths, single spaces);
+// limits: header line <= 80 bytes, path < PATH_MAX, xattr name <= 255,
+// value <= XATTR_SIZE_MAX. Full spec: docs/FORMATS.md.
 
 struct xattr {
   char *name;
@@ -49,8 +52,7 @@ struct changes_writer {
   FILE *f;
   bool ok;
   char why[PATH_MAX + 64];
-  char covered[PATH_MAX]; // last deleted or replaced non-dir path
-  bool have_covered;
+  char covered[PATH_MAX]; // last deleted or replaced non-dir path, or ""
 };
 
 void changes_open(struct changes_writer *w, const char *file);
@@ -63,7 +65,7 @@ void changes_emit(struct changes_writer *w, char tag, mode_t mode,
 bool changes_close(struct changes_writer *w);
 
 // Reader. Validates everything above; exits with status 1 naming the
-// first problem. The strings live until exit.
+// first problem. Free with changes_free().
 void changes_read(const char *file, struct changeset *cs);
 
 void changes_free(struct changeset *cs);
