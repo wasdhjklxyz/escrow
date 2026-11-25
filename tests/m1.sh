@@ -27,12 +27,16 @@ echo x > "$ws/replaced/x"
 before=$(snapshot "$ws")
 
 XDG_STATE_HOME=$tmp/state "$escrow" --workspace "$ws" -- \
-  "$here/agent/m1.sh" > "$tmp/out" || fail "escrow exited $?"
+  "$here/agent/m1.sh" > "$tmp/out" 2> "$tmp/err" || fail "escrow exited $?"
+run=$(sed -n 's/^escrow: run //p' "$tmp/err")
+[ -d "$run/upper" ] || fail "no run dir in: $(cat "$tmp/err")"
 
 cat > "$tmp/want" << 'EOF'
 A added.txt
 D doomed.txt
 M edit.txt
+A locked/
+A locked/s
 A newdir/
 A newdir/f
 D olddir/
@@ -44,6 +48,11 @@ EOF
 diff -u "$tmp/want" "$tmp/out" || fail "diff output"
 [ "$before" = "$(snapshot "$ws")" ] || fail "host workspace changed"
 echo "PASS: diff + host untouched"
+
+[ "$(stat -c %a "$run/upper/locked")" = 0 ] || fail "locked mode not restored"
+sleep 2
+[ ! -e "$run/upper/late.txt" ] || fail "background writer outlived the agent"
+echo "PASS: locked dir restored, leftovers killed"
 
 if XDG_STATE_HOME=$ws/state "$escrow" --workspace "$ws" -- true \
   2> "$tmp/err"; then
