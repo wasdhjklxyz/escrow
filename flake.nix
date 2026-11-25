@@ -23,12 +23,12 @@
         { name, tools }:
         let
           env = pkgs.buildEnv {
-            name = "escrow-role-${name}";
+            name = "escrow-env-${name}";
             paths = tools;
           };
           closure = pkgs.closureInfo { rootPaths = [ env ]; };
         in
-        pkgs.runCommand "escrow-policy-${name}" { } ''
+        pkgs.runCommand "escrow-role-${name}" { } ''
           { echo "env ${env}"; sed 's/^/store /' ${closure}/store-paths; } >$out
         '';
 
@@ -56,6 +56,10 @@
             '';
           };
 
+          # The hostile test agent's toolbox: util-linux (mount, unshare),
+          # attr (setfattr) and bash (/dev/tcp, /dev/udp) are there on purpose
+          # so the escape cases really try. Dropping one turns its attempts
+          # into ERROR (exit 127), not a silent pass.
           role-test = self.lib.mkRole pkgs {
             name = "test";
             tools = with pkgs; [
