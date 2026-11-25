@@ -24,8 +24,9 @@ Nix with flakes, its build sandbox on (the default). On Ubuntu 24.04:
 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`.
 
 The demo builds a small NixOS system (x86_64-linux) on first run: it
-needs network and a few minutes. `--claude` also needs ANTHROPIC_API_KEY
-in the environment and Landlock ABI >= 10 (escrow prints yours if not).
+needs network and a few minutes. `--claude` also needs a credential in the environment,
+CLAUDE_CODE_OAUTH_TOKEN (Claude subscription: `claude setup-token`) or
+ANTHROPIC_API_KEY (API credits), and Landlock ABI >= 10.
 The escrow binary is `build/bin/escrow` (or `nix build` and `result/bin`).
 
 ## Try it

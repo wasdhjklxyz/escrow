@@ -5,8 +5,9 @@
 #   sees the file diff and the closure diff -> signer signs -> apply ->
 #   verify-log -> a tampered log is caught.
 # usage: demo/run.sh [--claude]     run from the repo root, in `nix develop`
-#   --claude  use Claude Code as the agent (needs ANTHROPIC_API_KEY and a
-#             kernel with Landlock ABI >= 10 for --net)
+#   --claude  use Claude Code as the agent: needs CLAUDE_CODE_OAUTH_TOKEN
+#             (a Claude subscription: `claude setup-token`) or
+#             ANTHROPIC_API_KEY (API credits), and Landlock ABI >= 10
 set -eu
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -38,7 +39,10 @@ run grep -n 'extraGroups' "$d/ops/configuration.nix"
 step "the agent works on OPS-142, inside the jail"
 if [ "$agent" = claude ]; then
   role=$(nix build --no-link --print-out-paths "path:$repo#role-claude")
-  run "$escrow" --role "$role" --key "$d/alice" --net --env ANTHROPIC_API_KEY \
+  # Hand the agent exactly one credential; escrow passes nothing else in.
+  cred=ANTHROPIC_API_KEY
+  [ -n "${CLAUDE_CODE_OAUTH_TOKEN-}" ] && cred=CLAUDE_CODE_OAUTH_TOKEN
+  run "$escrow" --role "$role" --key "$d/alice" --net --env "$cred" \
     --workspace "$d/ops" -- claude -p --dangerously-skip-permissions \
     "Ticket OPS-142: in this NixOS config, add user dana to the ops group and
 rotate the ops-svc API key in keys/api.key to a new random demo value,
