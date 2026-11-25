@@ -88,9 +88,9 @@ void overlay_prepare(struct run *run, const char *state, const char *ws) {
     err(1, "mkdtemp %s", run->dir);
   mkdir_new(run->dir, "upper", run->upper);
   mkdir_new(run->dir, "work", run->work);
-  mkdir_new(run->dir, "merged", run->merged);
+  mkdir_new(run->dir, "root", run->root);
 
-  // The merged root takes its attributes from upper's root. Match the
+  // The overlay root takes its attributes from upper's root. Match the
   // workspace root so the agent sees the right mode and the diff can
   // report a chmod of it. The 0700 run dir still keeps others out.
   if (chmod(run->upper, st.st_mode & ALLPERMS) < 0)
@@ -122,7 +122,8 @@ static void drain_log(int fsfd) {
     warnx("%.*s", (int)n, buf);
 }
 
-int overlay_mount(const struct run *run, const char *ws) {
+int overlay_mount(const struct run *run, const char *ws, int dirfd,
+                  const char *path) {
   // Needs kernel >= 6.8 for "lowerdir+", and an upper fs with d_type and
   // user xattrs (ext4, btrfs, xfs; tmpfs >= 6.6). Missing support surfaces
   // as an fsconfig error followed by the kernel's reason from drain_log.
@@ -153,13 +154,15 @@ int overlay_mount(const struct run *run, const char *ws) {
     warn("fsmount");
     goto fail;
   }
-  if (move_mount(mfd, "", AT_FDCWD, run->merged, MOVE_MOUNT_F_EMPTY_PATH) < 0) {
-    warn("move_mount %s", run->merged);
-    goto fail;
-  }
-  return 0;
+  close(fsfd);
+  int r = move_mount(mfd, "", dirfd, path, MOVE_MOUNT_F_EMPTY_PATH);
+  if (r < 0)
+    warn("move_mount overlay %s", path);
+  close(mfd);
+  return r;
 
 fail:
   drain_log(fsfd);
+  close(fsfd);
   return -1;
 }

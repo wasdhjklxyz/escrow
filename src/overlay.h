@@ -9,10 +9,10 @@ struct run {
   char dir[PATH_MAX];
   char upper[PATH_MAX];
   char work[PATH_MAX];
-  char merged[PATH_MAX];
+  char root[PATH_MAX];
 };
 
-// Host side, before fork. Creates <state>/runs/<id>/{upper,work,merged}
+// Host side, before fork. Creates <state>/runs/<id>/{upper,work,root}
 // (0700). Runs are kept after the run, and nothing deletes them yet
 // (cleanup comes with M3's proposal lifecycle). Exits with status 1 if ws
 // isn't a directory, if the state dir would land inside the workspace, or
@@ -20,10 +20,11 @@ struct run {
 // refused run leaves the workspace untouched. ws must be realpath() output.
 void overlay_prepare(struct run *run, const char *state, const char *ws);
 
-// Child side, inside the new user+mount ns. Mounts an overlay with ws as
-// the read-only lower layer at run->merged. Returns 0, or -1 after printing
-// why (including the kernel's fsconfig log). Never exits. Its fds are
-// CLOEXEC and left open, so the caller must exec or _exit.
-int overlay_mount(const struct run *run, const char *ws);
+// Jail side, inside the new user+mount ns. Mounts an overlay with ws as
+// the read-only lower layer at `path` relative to dirfd (openat rules).
+// Returns 0, or -1 after printing why (including the kernel's fsconfig
+// log). Never exits. Closes every fd it opens.
+int overlay_mount(const struct run *run, const char *ws, int dirfd,
+                  const char *path);
 
 #endif
