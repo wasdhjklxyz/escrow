@@ -28,11 +28,11 @@ static void field_len(struct sha256 *h, const void *buf, size_t n) {
   sha256_write(h, buf, n);
 }
 
-static int skip_dots(const struct dirent *d) {
+int tree_skip_dots(const struct dirent *d) {
   return strcmp(d->d_name, ".") != 0 && strcmp(d->d_name, "..") != 0;
 }
 
-static int by_name(const struct dirent **a, const struct dirent **b) {
+int tree_by_name(const struct dirent **a, const struct dirent **b) {
   return strcmp((*a)->d_name, (*b)->d_name);
 }
 
@@ -173,7 +173,7 @@ static bool walk(struct sha256 *h, int dirfd, size_t len) {
   struct dirent **ents;
   bool ok = true;
 
-  int n = scandirat(dirfd, ".", &ents, skip_dots, by_name);
+  int n = scandirat(dirfd, ".", &ents, tree_skip_dots, tree_by_name);
   if (n < 0) {
     warn("scandir %s", len ? path : ".");
     return false;

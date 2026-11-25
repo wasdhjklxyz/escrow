@@ -94,8 +94,9 @@ static int make_file(int pfd, const char *name, const struct change *c) {
                   O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
   if (fd < 0)
     return -1;
-  if (write_all(fd, c->data, c->len) < 0 || fchmod(fd, c->mode) < 0 ||
-      set_xattrs(fd, c) < 0 || fsync(fd) < 0) {
+  // xattrs before the mode: setting one needs write access to the file.
+  if (write_all(fd, c->data, c->len) < 0 || set_xattrs(fd, c) < 0 ||
+      fchmod(fd, c->mode) < 0 || fsync(fd) < 0) {
     int e = errno;
     close(fd);
     errno = e;
@@ -116,12 +117,78 @@ static int finish_dir(int root, const struct change *c) {
   return r;
 }
 
+// Dirs on the way to a change that lacked u+rwx, opened up for the apply
+// and restored at the end: a 0555 dir whose own mode isn't changing must
+// still let an approved change below it through.
+struct relaxed {
+  char path[PATH_MAX];
+  mode_t mode;
+};
+static struct relaxed *relaxed;
+static size_t nrelaxed;
+
+static int relax_ancestors(int root, const char *path) {
+  struct stat st;
+  size_t len = 0;
+
+  for (;;) {
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof dir, "%.*s", (int)len, path);
+    int fd = open_beneath(root, dir, O_RDONLY | O_DIRECTORY);
+    if (fd < 0)
+      return errno == ENOENT ? 0 : -1; // the op itself will report it
+    if (fstat(fd, &st) < 0) {
+      close(fd);
+      return -1;
+    }
+    if ((st.st_mode & S_IRWXU) != S_IRWXU) {
+      struct relaxed *v = reallocarray(relaxed, nrelaxed + 1, sizeof *v);
+      if (!v)
+        err(1, "reallocarray");
+      relaxed = v;
+      snprintf(v[nrelaxed].path, PATH_MAX, "%s", dir);
+      v[nrelaxed++].mode = st.st_mode & 07777;
+      if (fchmod(fd, (st.st_mode & 07777) | S_IRWXU) < 0) {
+        close(fd);
+        return -1;
+      }
+    }
+    close(fd);
+    const char *slash = strchr(path + len + (len ? 1 : 0), '/');
+    if (!slash)
+      return 0;
+    len = (size_t)(slash - path);
+  }
+}
+
+// Back to the original modes, deepest first. A dir deleted since is fine.
+static int restore_ancestors(int root) {
+  int r = 0;
+  for (size_t i = nrelaxed; i-- > 0;) {
+    int fd = open_beneath(root, relaxed[i].path, O_RDONLY | O_DIRECTORY);
+    if (fd < 0) {
+      if (errno != ENOENT)
+        r = -1;
+      continue;
+    }
+    if (fchmod(fd, relaxed[i].mode) < 0)
+      r = -1;
+    close(fd);
+  }
+  free(relaxed);
+  relaxed = nullptr;
+  nrelaxed = 0;
+  return r;
+}
+
 static int apply_one(int root, dev_t dev, const struct change *c) {
   char name[NAME_MAX + 1];
   struct stat st;
 
   if (c->op == 'r')
     return 0; // all in finish_dir
+  if (relax_ancestors(root, c->path) < 0)
+    return -1;
   int pfd = open_parent(root, c->path, name);
   if (pfd < 0)
     return -1;
@@ -169,6 +236,11 @@ int apply_changes(const struct changeset *cs, const char *root) {
   for (size_t i = 0; i < cs->n && !bad; i++)
     if (apply_one(fd, st.st_dev, &cs->v[i]) < 0)
       bad = &cs->v[i];
+  if (!bad && restore_ancestors(fd) < 0) {
+    warn("apply: restoring dir modes");
+    close(fd);
+    return -1;
+  }
   // Deepest first, so a parent loses u+w only after its children are done.
   for (size_t i = cs->n; i-- > 0 && !bad;)
     if ((cs->v[i].op == 'd' || cs->v[i].op == 'r') &&

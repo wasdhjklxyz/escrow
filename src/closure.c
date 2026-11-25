@@ -4,155 +4,264 @@
 #include "changes.h"
 #include "proc.h"
 
-#include <ctype.h>
 #include <err.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-// Runs argv, returns its stdout (first line, trimmed) in out, or false.
-// Its stderr (nix's build chatter) is shown, escaped, only on failure.
-static bool capture(char *const argv[], char *out, size_t n) {
-  FILE *t = tmpfile(), *e = tmpfile();
-  if (!t || !e)
+enum { OUT_MAX = 1 << 16 };
+
+// Options on every nix call: no flake nixConfig honoured (it could add
+// substituters or settings), no import-from-derivation (no building during
+// eval), no lock file updates (no new inputs).
+#define NIX_SAFE                                                               \
+  "--no-update-lock-file", "--option", "accept-flake-config", "false",         \
+      "--option", "allow-import-from-derivation", "false"
+
+// Prefix for evaluating the agent-written tree: every proxy variable points
+// at a closed port, so an eval-time fetch (builtins.fetchurl, fetchTarball,
+// fetchGit over http) fails instead of carrying data out. The locked inputs
+// resolve from the store: the base was evaluated first. Not covered: ssh
+// git URLs and the DNS lookup they do (see docs/WRITEUP.md).
+#define NO_FETCH                                                               \
+  "env", "http_proxy=http://127.0.0.1:9", "https_proxy=http://127.0.0.1:9",    \
+      "all_proxy=http://127.0.0.1:9", "HTTP_PROXY=http://127.0.0.1:9",         \
+      "HTTPS_PROXY=http://127.0.0.1:9", "ALL_PROXY=http://127.0.0.1:9",        \
+      "no_proxy=", "NO_PROXY="
+
+static void skip(const char *why) {
+  printf("\nclosure diff: skipped, %s\n", why);
+}
+
+// Runs argv; its stdout goes to out (NUL-terminated, trimmed of one final
+// newline), its stderr to errs (if errs is null: shown, escaped, only on
+// failure). Returns false if it failed or couldn't run.
+static bool capture(char *const argv[], char *out, size_t n, FILE *errs) {
+  FILE *o = tmpfile(), *e = errs ? errs : tmpfile();
+  if (!o || !e)
     err(1, "tmpfile");
-  bool ok = run_cmd_err(argv, -1, fileno(t), fileno(e)) == 0;
-  if (!ok) {
+  out[0] = '\0';
+  bool ok = run_cmd_err(argv, -1, fileno(o), fileno(e)) == 0;
+  rewind(o);
+  size_t got = fread(out, 1, n - 1, o);
+  out[got] = '\0';
+  if (got && out[got - 1] == '\n')
+    out[got - 1] = '\0';
+  fclose(o);
+  if (!ok && !errs) {
     rewind(e);
     print_escaped(e);
   }
-  fclose(e);
-  rewind(t);
-  if (ok && !fgets(out, (int)n, t))
-    ok = false;
-  fclose(t);
-  out[strcspn(out, "\n")] = '\0';
+  if (!errs)
+    fclose(e);
   return ok;
 }
 
-// `nix store diff-closures` hardcodes ANSI colours (SGR: ESC [ digits/; m).
-// Drop those; any other byte still goes through print_escaped.
-static void print_without_sgr(FILE *in) {
-  FILE *out = tmpfile();
-  int c;
-  if (!out)
+// The drvPath of nixosConfigurations.<name>'s toplevel in flake dir.
+static bool drv_path(const char *dir, const char *name, bool agent_written,
+                     char out[PATH_MAX]) {
+  char ref[PATH_MAX + 128];
+  snprintf(ref, sizeof ref,
+           "path:%s#nixosConfigurations.%s.config.system.build.toplevel."
+           "drvPath",
+           dir, name);
+  char *plain[] = {"nix", "eval", "--raw", NIX_SAFE, ref, nullptr};
+  char *nofetch[] = {NO_FETCH, "nix", "eval", "--raw", NIX_SAFE, ref, nullptr};
+  return capture(agent_written ? nofetch : plain, out, PATH_MAX, nullptr) &&
+         strncmp(out, "/nix/store/", 11) == 0;
+}
+
+// A fixed-output derivation is the one kind that gets network inside the
+// Nix sandbox (builtin:fetchurl, fetchgit, ...), so building one that the
+// agent wrote could send workspace data anywhere. Refuse if `nix build
+// --dry-run` would build (not substitute) any. Over-matching is fine: a
+// false positive only skips the closure diff.
+static bool builds_fetcher(const char *drv, char *why, size_t n) {
+  char ref[PATH_MAX + 8], line[PATH_MAX + 64];
+  static char out[OUT_MAX];
+  snprintf(ref, sizeof ref, "%s^*", drv);
+  char *dry[] = {"nix", "build", "--dry-run", NIX_SAFE, ref, nullptr};
+  FILE *errs = tmpfile();
+  if (!errs)
     err(1, "tmpfile");
-  while ((c = getc(in)) != EOF) {
-    if (c == 0x1b) {
-      int d = getc(in);
-      if (d == '[') {
-        while ((d = getc(in)) != EOF && (isdigit(d) || d == ';'))
-          ;
-        if (d == 'm')
-          continue;
-        putc(0x1b, out);
-        putc('[', out);
-      } else {
-        putc(0x1b, out);
-      }
-      if (d != EOF)
-        putc(d, out);
+  if (!capture(dry, out, sizeof out, errs)) {
+    snprintf(why, n, "nix build --dry-run failed");
+    fclose(errs);
+    return true;
+  }
+  rewind(errs);
+  bool built = false, fetcher = false;
+  while (!fetcher && fgets(line, sizeof line, errs)) {
+    if (line[0] != ' ') {
+      built = strstr(line, "will be built") != nullptr;
       continue;
     }
-    putc(c, out);
+    char *p = line + strspn(line, " ");
+    p[strcspn(p, "\n")] = '\0';
+    size_t len = strlen(p);
+    if (!built || len < 4 || strcmp(p + len - 4, ".drv") != 0)
+      continue;
+    char *show[] = {"nix", "derivation", "show", p, nullptr};
+    if (!capture(show, out, sizeof out, nullptr) || strstr(out, "outputHash") ||
+        strstr(out, "\"hashAlgo\"") || strstr(out, "\"hash\":")) {
+      snprintf(why, n, "it would build fixed-output derivation %s", p);
+      fetcher = true;
+    }
   }
+  fclose(errs);
+  return fetcher;
+}
+
+static bool build(const char *drv, char out[PATH_MAX]) {
+  char ref[PATH_MAX + 8];
+  snprintf(ref, sizeof ref, "%s^out", drv);
+  char *argv[] = {"nix",    "build", "--no-link", "--print-out-paths",
+                  NIX_SAFE, ref,     nullptr};
+  return capture(argv, out, PATH_MAX, nullptr);
+}
+
+// `nix store diff-closures` hardcodes ANSI colours (SGR: ESC [ digits ; m)
+// and uses UTF-8 arrows. Drop the colours, spell "→" and "∅" in ASCII, and
+// escape everything else (print_escaped).
+static void print_diff(FILE *in) {
+  FILE *out = tmpfile();
+  char *line = nullptr;
+  size_t cap = 0;
+  ssize_t len;
+  if (!out)
+    err(1, "tmpfile");
+  while ((len = getline(&line, &cap, in)) > 0) {
+    for (ssize_t i = 0; i < len; i++) {
+      size_t k = line[i] == 0x1b && line[i + 1] == '['
+                     ? 2 + strspn(line + i + 2, "0123456789;")
+                     : 0;
+      if (k && line[i + (ssize_t)k] == 'm') {
+        i += (ssize_t)k;
+      } else if (strncmp(line + i, "→", 3) == 0) {
+        fputs("->", out);
+        i += 2;
+      } else if (strncmp(line + i, "∅", 3) == 0) {
+        fputs("{}", out);
+        i += 2;
+      } else {
+        putc(line[i], out);
+      }
+    }
+  }
+  free(line);
   rewind(out);
   print_escaped(out);
   fclose(out);
 }
 
-static bool build(const char *dir, const char *name, char out[PATH_MAX]) {
-  char ref[PATH_MAX + 128];
-  snprintf(ref, sizeof ref,
-           "path:%s#nixosConfigurations.%s.config.system.build.toplevel", dir,
-           name);
-  char *argv[] = {"nix",
-                  "build",
-                  "--no-link",
-                  "--print-out-paths",
-                  "--no-update-lock-file",
-                  "--option",
-                  "accept-flake-config",
-                  "false",
-                  "--option",
-                  "allow-import-from-derivation",
-                  "false",
-                  ref,
-                  nullptr};
-  return capture(argv, out, PATH_MAX);
+static void diff_config(const char *ws, const char *proposed,
+                        const char *name) {
+  char a[PATH_MAX], b[PATH_MAX], why[PATH_MAX + 64];
+  char base_out[PATH_MAX], proposed_out[PATH_MAX];
+
+  printf("\nclosure diff: nixosConfigurations.%s (building...)\n", name);
+  fflush(stdout);
+  if (!drv_path(ws, name, false, a) || !drv_path(proposed, name, true, b)) {
+    printf("  evaluation failed\n");
+    return;
+  }
+  if (builds_fetcher(b, why, sizeof why) ||
+      builds_fetcher(a, why, sizeof why)) {
+    printf("  refused: %s (it would have network)\n", why);
+    return;
+  }
+  if (!build(a, base_out) || !build(b, proposed_out)) {
+    printf("  build failed\n");
+    return;
+  }
+  char *diff[] = {"nix",    "store",      "diff-closures",
+                  base_out, proposed_out, nullptr};
+  FILE *t = tmpfile();
+  if (!t)
+    err(1, "tmpfile");
+  // ftell works: the child's stdout shares this file's offset.
+  if (run_cmd(diff, -1, fileno(t)) != 0)
+    printf("  nix store diff-closures failed\n");
+  else if (ftell(t) == 0)
+    printf("  no package version or size changes (not every change shows "
+           "here: the file diff above is what is applied)\n");
+  rewind(t);
+  print_diff(t);
+  fclose(t);
 }
 
 void closure_diff(const char *ws, const struct changeset *cs) {
-  char flake[PATH_MAX], names[4096], ref[PATH_MAX + 32];
-  char tmp[PATH_MAX - 8], proposed[PATH_MAX];
+  char path[PATH_MAX], ref[PATH_MAX + 32], tmp[PATH_MAX - 4]; // room for /ws
+  char proposed[PATH_MAX], sandbox[64];
+  static char names[OUT_MAX];
 
-  snprintf(flake, sizeof flake, "%s/flake.nix", ws);
-  if (access(flake, F_OK) != 0)
+  snprintf(path, sizeof path, "%s/flake.nix", ws);
+  if (access(path, F_OK) != 0)
     return;
-  for (size_t i = 0; i < cs->n; i++) {
+  snprintf(path, sizeof path, "%s/flake.lock", ws);
+  if (access(path, F_OK) != 0) {
+    skip("no flake.lock (it would have to fetch inputs)");
+    return;
+  }
+  for (size_t i = 0; i < cs->n; i++)
     if (strcmp(cs->v[i].path, "flake.lock") == 0) {
-      printf("\nclosure diff: skipped, the change set touches flake.lock "
-             "(building could fetch new inputs)\n");
+      skip("the change set touches flake.lock");
       return;
     }
+  // Nix normally sandboxes builds; with it off, an agent-written builder
+  // would run as us, with our files and network.
+  char *show[] = {"nix", "config", "show", "sandbox", nullptr};
+  if (!capture(show, sandbox, sizeof sandbox, nullptr)) {
+    skip("can't run nix");
+    return;
   }
+  if (strcmp(sandbox, "true") != 0) {
+    skip("nix's build sandbox is off (sandbox = true is required)");
+    return;
+  }
+
   snprintf(ref, sizeof ref, "path:%s#nixosConfigurations", ws);
-  char *eval[] = {"nix",      "eval",
-                  "--json",   "--no-update-lock-file",
-                  "--option", "accept-flake-config",
-                  "false",    ref,
-                  "--apply",  "builtins.attrNames",
-                  nullptr};
-  if (!capture(eval, names, sizeof names)) {
-    printf("\nclosure diff: skipped, no nixosConfigurations\n");
+  char *eval[] = {
+      "nix",  "eval", "--json", NIX_SAFE, ref, "--apply", "builtins.attrNames",
+      nullptr};
+  if (!capture(eval, names, sizeof names, nullptr)) {
+    skip("no nixosConfigurations");
     return;
   }
 
   const char *tmpdir = getenv("TMPDIR");
-  snprintf(tmp, sizeof tmp, "%s/escrow-review-XXXXXX",
-           tmpdir && *tmpdir ? tmpdir : "/tmp");
+  int n = snprintf(tmp, sizeof tmp, "%s/escrow-review-XXXXXX",
+                   tmpdir && *tmpdir ? tmpdir : "/tmp");
+  if (n < 0 || n >= (int)sizeof tmp) {
+    skip("TMPDIR is too long");
+    return;
+  }
   if (!mkdtemp(tmp))
     err(1, "mkdtemp %s", tmp);
   snprintf(proposed, sizeof proposed, "%s/ws", tmp);
   char *cp[] = {"cp",       "-a",     "--no-target-directory",
                 (char *)ws, proposed, nullptr};
   if (run_cmd(cp, -1, -1) != 0 || apply_changes(cs, proposed) < 0) {
-    printf("\nclosure diff: skipped, couldn't materialize the proposal\n");
     remove_dir(tmp);
-    return;
+    {
+      skip("couldn't materialize the proposal");
+      return;
+    }
   }
-
-  // ["a","b"]: config names are Nix attribute names. Only plain ones are
-  // built, so a name can't smuggle anything into the flake reference.
+  // ["a","b"]: only plain attribute names are built, so a name can't
+  // smuggle anything into a flake reference.
   for (char *s = strtok(names, "[\","); s; s = strtok(nullptr, "[\",")) {
-    char a[PATH_MAX], b[PATH_MAX];
     if (strcmp(s, "]") == 0)
       continue;
-    if (strspn(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                  "0123456789_-") != strlen(s)) {
-      printf("\nclosure diff: skipped config with an unusual name\n");
+    if (!*s || strspn(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                         "0123456789_-") != strlen(s)) {
+      skip("a config name that isn't a plain identifier");
       continue;
     }
-    printf("\nclosure diff, nixosConfigurations.%s (building...)\n", s);
-    fflush(stdout);
-    if (!build(ws, s, a) || !build(proposed, s, b)) {
-      printf("  build failed; see the nix output above\n");
-      continue;
-    }
-    char *diff[] = {"nix", "store", "diff-closures", a, b, nullptr};
-    FILE *t = tmpfile();
-    if (!t)
-      err(1, "tmpfile");
-    if (run_cmd(diff, -1, fileno(t)) != 0)
-      printf("  nix store diff-closures failed\n");
-    if (ftell(t) == 0)
-      printf("  (no package or size changes)\n");
-    rewind(t);
-    print_without_sgr(t);
-    fclose(t);
+    diff_config(ws, proposed, s);
   }
-  fflush(stdout);
   remove_dir(tmp);
 }

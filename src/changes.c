@@ -88,14 +88,19 @@ void changes_emit(struct changes_writer *w, char tag, mode_t mode,
     snprintf(w->covered, sizeof w->covered, "%s", path);
     return;
   }
-  // diff.c passes only S_IFDIR for dirs: take the real bits from the fd.
-  if (fd >= 0) {
-    if (fstat(fd, &st) < 0)
-      err(1, "fstat %s", path);
-    mode = st.st_mode;
-  }
+  // mode is as the agent left it. The walk may have added u+r(x) to read
+  // the entry (diff.c relax), so the fd is used for size and content only.
+  if (fd >= 0 && fstat(fd, &st) < 0)
+    err(1, "fstat %s", path);
   if (mode & (S_ISUID | S_ISGID) || (mode & S_ISVTX && !S_ISDIR(mode))) {
     wfail(w, "%s: set-id or sticky bit", path);
+    return;
+  }
+  // The owner must be able to read what apply writes: the post-apply tree
+  // hash, and every later base pin, read the whole workspace.
+  if ((S_ISREG(mode) && !(mode & S_IRUSR)) ||
+      (S_ISDIR(mode) && (mode & (S_IRUSR | S_IXUSR)) != (S_IRUSR | S_IXUSR))) {
+    wfail(w, "%s: mode leaves its owner unable to read it", path);
     return;
   }
   if (S_ISDIR(mode)) {

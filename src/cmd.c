@@ -17,6 +17,7 @@
 #define EV_SIGN "sign"
 #define EV_APPLY "apply"
 
+#include <dirent.h>
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -65,6 +66,13 @@ void propose(const struct propose *p, const struct run *run, int status,
   strftime(r.time, sizeof r.time, "%Y-%m-%dT%H:%M:%SZ", gmtime(&now));
   r.workspace = (char *)p->ws;
   r.exit = status;
+  r.net = p->net;
+  char envs[1024] = "";
+  for (char *const *e = p->pass_env; e && *e; e++) {
+    size_t len = strlen(envs);
+    snprintf(envs + len, sizeof envs - len, "%s%s", len ? " " : "", *e);
+  }
+  r.env = envs;
   if (!realpath("/proc/self/exe", exe))
     err(1, "realpath /proc/self/exe");
   char *qexe = record_quoted(exe);
@@ -196,6 +204,16 @@ static void load(struct proposal *p, const struct log *log,
   if (sgn)
     p->signer =
         check_step(roles, p->dir, sgn, NS_SIGN, p->record_path, ROLE_SIGNER);
+  // Separation of duties, from the signatures themselves: a requester can
+  // append log lines, so their mere presence proves nothing. Every command
+  // that loads a proposal refuses one that breaks these.
+  if (p->reviewer == p->requester)
+    errx(1, "%s: reviewed by its requester %s", id, p->requester->name);
+  if (p->signer && !p->reviewer)
+    errx(1, "%s: signed before any review", id);
+  if (p->signer && (p->signer == p->requester || p->signer == p->reviewer))
+    errx(1, "%s: signed by %s, who requested or reviewed it", id,
+         p->signer->name);
 }
 
 // ---------------------------------------------------------------- review
@@ -263,6 +281,49 @@ static void show_content(int root, const struct change *c) {
     fclose(base);
 }
 
+// Everything below dir root/path, which the change will delete: the signer
+// must see a recursive delete in full, not as one line. Listed from the
+// workspace through the no-symlink resolver, in walk order.
+static void show_deleted_tree(int root, const char *path, size_t *shown) {
+  enum { DELETED_MAX = 200 };
+  struct dirent **ents;
+
+  int fd = open_beneath(root, path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+  if (fd < 0)
+    return;
+  int n = scandirat(fd, ".", &ents, tree_skip_dots, tree_by_name);
+  close(fd);
+  if (n < 0) {
+    printf("    (can't list what is below: %s)\n", strerror(errno));
+    return;
+  }
+  for (int i = 0; i < n; i++) {
+    char sub[PATH_MAX];
+    snprintf(sub, sizeof sub, "%s%s%s", path, *path ? "/" : "",
+             ents[i]->d_name);
+    if ((*shown)++ < DELETED_MAX) {
+      char *q = record_quoted(sub);
+      printf("    deletes %s\n", q);
+      free(q);
+    }
+    struct stat st;
+    int sfd = open_beneath(root, sub, O_PATH | O_NOFOLLOW);
+    if (sfd >= 0 && fstat(sfd, &st) == 0 && S_ISDIR(st.st_mode))
+      show_deleted_tree(root, sub, shown);
+    if (sfd >= 0)
+      close(sfd);
+    free(ents[i]);
+  }
+  free(ents);
+}
+
+static void show_deletions(int root, const char *path) {
+  size_t shown = 0;
+  show_deleted_tree(root, path, &shown);
+  if (shown > 200)
+    printf("    ... %zu entries deleted in all\n", shown);
+}
+
 static void show_xattrs(const struct change *c) {
   char sha[SHA256_HEX + 1], *q;
   for (size_t i = 0; i < c->nx; i++) {
@@ -275,19 +336,23 @@ static void show_xattrs(const struct change *c) {
 
 // What the signer approves, rendered from the change set (never from
 // upper/ or any stored text) against the workspace as it is now.
-static void render(const struct proposal *p) {
+static void render(const struct proposal *p, bool closures) {
   char now[SHA256_HEX + 1];
 
   printf("proposal %s\n  requester %s\n  time      %s\n  cmd       %s\n"
-         "  exit      %d\n  workspace %s\n  role-env  %s\n  base      %s\n"
+         "  exit      %d\n  net       %s\n  env       %s\n  workspace %s\n  "
+         "role-env  %s\n  base      %s\n"
          "  changes   %s\n",
          p->rec.id, p->requester->name, p->rec.time, p->rec.cmd, p->rec.exit,
-         p->rec.workspace, p->rec.role_env, p->rec.base, p->rec.changes);
+         p->rec.net ? "yes (TCP 443, DNS)" : "no", p->rec.env, p->rec.workspace,
+         p->rec.role_env, p->rec.base, p->rec.changes);
   if (p->reviewer)
     printf("  reviewer  %s\n", p->reviewer->name);
   if (p->signer)
     printf("  signer    %s\n", p->signer->name);
-  if (!tree_hash(p->rec.workspace, now) || strcmp(now, p->rec.base) != 0)
+  bool moved =
+      !tree_hash(p->rec.workspace, now) || strcmp(now, p->rec.base) != 0;
+  if (moved)
     printf("  WARNING: the workspace no longer matches base; apply will "
            "refuse\n");
   printf("\n");
@@ -304,13 +369,18 @@ static void render(const struct proposal *p) {
     if (fd >= 0)
       close(fd);
     if (c->op == 'D') {
-      printf("D %s\n", q);
+      printf("D %s%s\n", q, exists && S_ISDIR(st.st_mode) ? " (dir)" : "");
+      if (exists && S_ISDIR(st.st_mode))
+        show_deletions(root, c->path);
     } else {
       const char *kind = c->op == 'd' || c->op == 'r' ? "dir"
                          : c->op == 'f'               ? "file"
                          : c->op == 'l'               ? "symlink"
                                                       : "fifo";
-      if (exists)
+      if (exists && S_ISDIR(st.st_mode) && c->op != 'd' && c->op != 'r')
+        printf("M %s dir -> %s mode %04o -> %04o", q, kind, st.st_mode & 07777,
+               c->mode);
+      else if (exists)
         printf("M %s %s mode %04o -> %04o", q, kind, st.st_mode & 07777,
                c->mode);
       else
@@ -322,13 +392,20 @@ static void render(const struct proposal *p) {
       }
       putchar('\n');
       show_xattrs(c);
+      if (exists && S_ISDIR(st.st_mode) && c->op != 'd' && c->op != 'r')
+        show_deletions(root, c->path);
       if (c->op == 'f')
         show_content(root, c);
     }
     free(q);
   }
   close(root);
-  closure_diff(p->rec.workspace, &p->cs);
+  // Opt-in: it evaluates and builds agent-written Nix on this host
+  // (closure.h), and a workspace that moved would diff the wrong base.
+  if (closures && moved)
+    printf("\nclosure diff: skipped, the workspace no longer matches base\n");
+  else if (closures)
+    closure_diff(p->rec.workspace, &p->cs);
   fflush(stdout);
 }
 
@@ -336,6 +413,7 @@ static void render(const struct proposal *p) {
 
 struct args {
   const char *state, *roles, *key, *id;
+  bool closures; // review/sign: also build the NixOS closure diff
 };
 
 static void parse(int argc, char *argv[], struct args *o, bool want_id) {
@@ -343,6 +421,7 @@ static void parse(int argc, char *argv[], struct args *o, bool want_id) {
       {"state", required_argument, nullptr, 's'},
       {"roles", required_argument, nullptr, 'R'},
       {"key", required_argument, nullptr, 'k'},
+      {"closures", no_argument, nullptr, 'c'},
       {},
   };
   int c;
@@ -358,6 +437,9 @@ static void parse(int argc, char *argv[], struct args *o, bool want_id) {
       break;
     case 'k':
       o->key = optarg;
+      break;
+    case 'c':
+      o->closures = true;
       break;
     default:
       exit(2);
@@ -401,7 +483,7 @@ int cmd_review(int argc, char *argv[]) {
   roles_load(&roles, roles_path(o.roles));
   log_open(&log, o.state, true);
   load(&p, &log, &roles, o.state, o.id);
-  render(&p);
+  render(&p, o.closures);
   if (!o.key)
     return 0;
   if (p.reviewer)
@@ -439,7 +521,7 @@ int cmd_sign(int argc, char *argv[]) {
     errx(1, "%s has not been reviewed", o.id);
   if (p.signer)
     errx(1, "%s was already signed by %s", o.id, p.signer->name);
-  render(&p);
+  render(&p, o.closures);
   sig_path(sig, p.dir, log_next_seq(&log), EV_SIGN);
   const struct principal *who =
       sig_create(&roles, o.key, NS_SIGN, p.record_path, sig);

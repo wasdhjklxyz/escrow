@@ -14,6 +14,8 @@
 //   workspace <abs path>
 //   cmd <argv, each quoted like diff.c paths, space-separated>
 //   exit <agent exit status>
+//   net 0|1                               whether the agent had --net
+//   env <NAME ...> | -                    --env names handed to it (no values)
 //   escrow <escrow binary path>          \  attested by the requester:
 //   role-policy <sha256 of policy file>   |  she runs escrow, so these say
 //   role-env <role env store path>        |  what she ran, not what a
@@ -31,6 +33,8 @@ struct record {
   char *workspace;
   char *cmd;
   int exit;
+  bool net;  // ran with --net
+  char *env; // --env variable NAMES (never values), space-separated, or "-"
   char *escrow;
   char role_policy[SHA256_HEX + 1];
   char *role_env;
