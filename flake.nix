@@ -14,6 +14,24 @@
       eachSystem = nixpkgs.lib.genAttrs (import systems);
     in
     {
+      # A role policy for `escrow --role`: the role's buildEnv (the agent's
+      # PATH is env/bin) and its full runtime closure, the only store paths
+      # the jail can see. closureInfo is `nix path-info -r` at build time,
+      # so escrow never evaluates Nix.
+      lib.mkRole =
+        pkgs:
+        { name, tools }:
+        let
+          env = pkgs.buildEnv {
+            name = "escrow-role-${name}";
+            paths = tools;
+          };
+          closure = pkgs.closureInfo { rootPaths = [ env ]; };
+        in
+        pkgs.runCommand "escrow-policy-${name}" { } ''
+          { echo "env ${env}"; sed 's/^/store /' ${closure}/store-paths; } >$out
+        '';
+
       packages = eachSystem (
         system:
         let
@@ -27,6 +45,29 @@
             nativeBuildInputs = with pkgs; [ cmake ];
             meta.platforms = pkgs.lib.platforms.linux;
           };
+
+          # The test agents and escape cases, at env/share/escrow-tests.
+          tests = pkgs.stdenvNoCC.mkDerivation {
+            name = "escrow-tests";
+            src = ./tests;
+            installPhase = ''
+              mkdir -p $out/share/escrow-tests
+              cp -r agent escape $out/share/escrow-tests/
+            '';
+          };
+
+          role-test = self.lib.mkRole pkgs {
+            name = "test";
+            tools = with pkgs; [
+              attr
+              bash
+              coreutils
+              findutils
+              gnugrep
+              util-linux
+              self.packages.${system}.tests
+            ];
+          };
         }
       );
 
@@ -38,7 +79,10 @@
         {
           default = pkgs.mkShell {
             name = "escrow";
-            packages = with pkgs; [ clang-tools ];
+            packages = with pkgs; [
+              attr
+              clang-tools
+            ];
             inputsFrom = [ self.packages.${system}.default ];
             shellHook = ''
               git config core.hooksPath .githooks
