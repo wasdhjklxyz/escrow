@@ -76,6 +76,27 @@ static int open_dir(int dfd, const char *name, const struct walk *w) {
   return fd;
 }
 
+/*
+ * Upper entries belong to our uid, but the agent had CAP_DAC_OVERRIDE in its
+ * userns and we don't: a dir it chmod'ed 000 would abort the walk. Add u+rx
+ * for the walk; close_upper_dir restores the mode the agent left.
+ */
+static int open_upper_dir(int dfd, const char *name, mode_t mode, int *relaxed,
+                          const struct walk *w) {
+  mode_t perm = mode & 07777;
+  *relaxed = (perm & (S_IRUSR | S_IXUSR)) != (S_IRUSR | S_IXUSR);
+  if (*relaxed && fchmodat(dfd, name, perm | S_IRUSR | S_IXUSR, 0) < 0)
+    err(1, "chmod u+rx %s", w->len ? w->path : name);
+  return open_dir(dfd, name, w);
+}
+
+static void close_upper_dir(int fd, mode_t mode, int relaxed,
+                            const struct walk *w) {
+  if (relaxed && fchmod(fd, mode & 07777) < 0)
+    err(1, "restore mode %s", w->path);
+  xclose(fd);
+}
+
 /* lstat relative to dfd; 0 if absent. */
 static int lstat_at(int dfd, const char *name, struct stat *st,
                     const struct walk *w) {
@@ -221,6 +242,9 @@ static int unchanged(int ufd, int lfd, const char *name, const struct stat *us,
                      const struct stat *ls, const struct walk *w) {
   if (us->st_mode != ls->st_mode)
     return 0;
+  /* Same mode without u+r: we can't read either side, so report it. */
+  if (S_ISREG(us->st_mode) && !(us->st_mode & S_IRUSR))
+    return 0;
   if (S_ISREG(us->st_mode))
     return us->st_size == ls->st_size && same_bytes(ufd, lfd, name, w);
   if (S_ISLNK(us->st_mode))
@@ -244,7 +268,8 @@ static void walk_entry(struct walk *w, int ufd, int lfd, int opaque,
     if (has_lower)
       deleted(w, lfd, name, &ls);
   } else if (S_ISDIR(us.st_mode)) {
-    int sub = open_dir(ufd, name, w);
+    int relaxed;
+    int sub = open_upper_dir(ufd, name, us.st_mode, &relaxed, w);
     int sub_opaque = opaque || is_opaque(sub, w);
     if (has_lower && S_ISDIR(ls.st_mode)) {
       int lsub = open_dir(lfd, name, w);
@@ -256,7 +281,7 @@ static void walk_entry(struct walk *w, int ufd, int lfd, int opaque,
       emit(w, 'A', us.st_mode);
       walk_dir(w, sub, -1, 0);
     }
-    xclose(sub);
+    close_upper_dir(sub, us.st_mode, relaxed, w);
   } else if (!has_lower) {
     emit(w, 'A', us.st_mode);
   } else if (S_ISDIR(ls.st_mode)) {
@@ -301,14 +326,17 @@ static void walk_dir(struct walk *w, int ufd, int lfd, int opaque) {
 
 void diff_print(const char *upper, const char *lower, FILE *out) {
   struct walk w = {.out = out};
-  int ufd = open(upper, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-  if (ufd < 0)
-    err(1, "open %s", upper);
+  /* The agent can chmod the workspace root too; that copies up to upper. */
+  struct stat us;
+  if (lstat(upper, &us) < 0)
+    err(1, "stat %s", upper);
+  int relaxed;
+  int ufd = open_upper_dir(AT_FDCWD, upper, us.st_mode, &relaxed, &w);
   int lfd = open(lower, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
   if (lfd < 0)
     err(1, "open %s", lower);
   walk_dir(&w, ufd, lfd, 0);
-  xclose(ufd);
+  close_upper_dir(ufd, us.st_mode, relaxed, &w);
   xclose(lfd);
   if (fflush(out) == EOF)
     err(1, "write diff");
