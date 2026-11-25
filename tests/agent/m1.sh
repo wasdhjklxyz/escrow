@@ -3,6 +3,7 @@
 # makes one change of each kind that tests/m1.sh expects in the diff.
 set -eu
 
+chmod 750 . # workspace root is 755
 echo new >added.txt
 echo more >>edit.txt
 rm doomed.txt
@@ -18,5 +19,10 @@ echo z >locked/z # locked/ is 000 in the workspace: root in the ns can write
 mkdir hidden
 echo s >hidden/s
 chmod 000 hidden # escrow must still walk it, then restore the mode
+ln -s /etc/passwd link
+# Hostile names: must come out quoted, not as forged or erased lines.
+: >'a b'
+: >"$(printf 'evil\nD keep.txt')"
+: >"$(printf 'backdoor\033[2K')"
 # Outlives the agent. escrow must kill it before the diff.
 sh -c 'sleep 1; echo late >late.txt' &
