@@ -1,4 +1,6 @@
 #!/bin/sh
+# The agent has no caps and Landlock forbids mount topology changes. Note:
+# util-linux refuses mount/umount in userspace before the syscall.
 . "$(dirname "$0")/lib.sh"
 d=$(mktemp -d)
 try "mount tmpfs" mount -t tmpfs none "$d"

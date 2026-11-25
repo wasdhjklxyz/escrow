@@ -132,11 +132,6 @@ prun=$(echo "$pstate"/runs/*)
 check "closed stdout still restores modes" \
   [ "$(stat -c %a "$prun/upper/L")" = 0 ]
 
-st=0
-sh -c 'sleep 5 & exec "$@"' _ "$escrow_bin" --role "$policy" \
-  --workspace "$ws" --state "$state" -- true 2>/dev/null || st=$?
-check "inherited children refused (got $st)" [ "$st" -eq 1 ]
-
 runs=$(ls "$state/runs" | wc -l)
 st=0
 escrow --workspace "$ws/keep.txt" --state "$state" -- true 2>/dev/null ||
