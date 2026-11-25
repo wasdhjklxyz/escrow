@@ -7,12 +7,13 @@
 // exits, upper/ holds everything it changed: that is the change set.
 struct run {
   char dir[PATH_MAX];
-  char upper[PATH_MAX];
-  char work[PATH_MAX];
-  char root[PATH_MAX];
+  char upper[PATH_MAX]; // overlay upper: the change set
+  char work[PATH_MAX];  // overlay workdir (kernel scratch)
+  char root[PATH_MAX];  // mountpoint of the jail's root tmpfs; stays empty
+  char log[PATH_MAX];   // the agent's stdout + stderr (created by jail_run)
 };
 
-// Host side, before fork. Creates <state>/runs/<id>/{upper,work,root}
+// Host side, before clone3. Creates <state>/runs/<id>/{upper,work,root}
 // (0700). Runs are kept after the run, and nothing deletes them yet
 // (cleanup comes with M3's proposal lifecycle). Exits with status 1 if ws
 // isn't a directory, if the state dir would land inside the workspace, or

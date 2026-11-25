@@ -6,13 +6,16 @@
 int landlock_abi(void);
 
 // Jail side, in the agent after pivot_root and PR_SET_NO_NEW_PRIVS. Allows
-// only: read/exec under /nix/store, full access under /work and /tmp,
-// read/write on the /dev nodes, read under /proc, listing dirs from /.
-// TCP: bind denied, connect allowed only to port 443 when net is true and
-// denied otherwise (ABI >= 4). ABI >= 6 also scopes abstract unix sockets
-// and signals to the jail. abi is landlock_abi(): 0 warns and returns 0
-// (the namespaces and pivot_root still contain the agent). Returns -1
-// after printing why on any failure. Never exits.
-int landlock_apply(int abi, bool net);
+// only: read/exec under /nix/store, read/write (no exec) under /work and
+// /tmp, read/write on /dev's nodes, read under /proc, listing dirs from /,
+// write to the open file `log` (the agent's stdout/stderr, so reopening
+// /dev/stdout works), and with net, reading /etc/resolv.conf.
+// Network (ABI >= 4, UDP from ABI >= 10): bind and connect denied, except
+// with net: TCP connect to 443, UDP send to 53, UDP bind to an ephemeral
+// port. ABI >= 6 also scopes abstract unix sockets and signals to the
+// jail. abi is landlock_abi(): 0 warns and returns 0 (the namespaces and
+// pivot_root still contain the agent). Returns -1 after printing why on
+// any failure. Never exits.
+int landlock_apply(int abi, bool net, int log);
 
 #endif
