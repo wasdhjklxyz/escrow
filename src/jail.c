@@ -306,27 +306,49 @@ out:
 // Clean env: nothing from the host but TERM and LANG, so host tokens
 // (GITHUB_TOKEN, AWS_*, SSH_AUTH_SOCK) don't reach the agent. execvp
 // searches the PATH of environ, so swap environ itself.
-static int clean_environ(const char *env) {
-  static const char *const keep[] = {"TERM=", "LANG="};
-  static char path[PATH_MAX];
-  static char *envp[] = {path,    "HOME=/tmp", "PWD=/work",
-                         nullptr, nullptr,     nullptr};
-  size_t n = 3;
+// The first NAME=value in environ, or nullptr (getenv, but the whole entry).
+static char *env_entry(const char *name) {
+  size_t n = strlen(name);
+  for (char **e = environ; e && *e; e++)
+    if (strncmp(*e, name, n) == 0 && (*e)[n] == '=')
+      return *e;
+  return nullptr;
+}
 
+static int clean_environ(const char *env, char *const pass[]) {
+  static const char *const keep[] = {"TERM", "LANG"};
+  static char path[PATH_MAX], certs[PATH_MAX];
+  size_t npass = 0, n = 0;
+
+  while (pass && pass[npass])
+    npass++;
+  char **envp = calloc(5 + sizeof keep / sizeof *keep + npass, sizeof *envp);
+  if (!envp) {
+    warn("calloc");
+    return -1;
+  }
   int len = snprintf(path, sizeof path, "PATH=%s/bin", env);
   if (len < 0 || len >= (int)sizeof path) {
     warnx("path too long: %s/bin", env);
     return -1;
   }
-  // The first match wins, as with getenv.
-  for (size_t i = 0; i < sizeof keep / sizeof *keep; i++) {
-    for (char **e = environ; e && *e; e++) {
-      if (strncmp(*e, keep[i], strlen(keep[i])) == 0) {
-        envp[n++] = *e;
-        break;
-      }
-    }
-  }
+  envp[n++] = path;
+  envp[n++] = "HOME=/tmp";
+  envp[n++] = "PWD=/work";
+  // A role that ships CA certificates (nixpkgs cacert) gets them used:
+  // the jail has no /etc/ssl.
+  len = snprintf(certs, sizeof certs,
+                 "SSL_CERT_FILE=%s/etc/ssl/certs/ca-bundle.crt", env);
+  if (len > 0 && len < (int)sizeof certs &&
+      access(certs + strlen("SSL_CERT_FILE="), R_OK) == 0)
+    envp[n++] = certs;
+  for (size_t i = 0; i < sizeof keep / sizeof *keep; i++)
+    if (env_entry(keep[i]))
+      envp[n++] = env_entry(keep[i]);
+  // --env NAME: the operator chose to hand this one to the agent.
+  for (size_t i = 0; i < npass; i++)
+    if (env_entry(pass[i]))
+      envp[n++] = env_entry(pass[i]);
   environ = envp;
   return 0;
 }
@@ -380,7 +402,7 @@ static void kill_target(int sig) {
     warn("chdir /work");
     _exit(JAIL_SETUP_FAILED);
   }
-  if (clean_environ(j->policy->env) < 0)
+  if (clean_environ(j->policy->env, j->pass_env) < 0)
     _exit(JAIL_SETUP_FAILED);
   // Landlock and seccomp require it, and it keeps exec from ever gaining
   // privileges.

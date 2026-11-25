@@ -9,8 +9,9 @@ struct jail {
   const struct run *run;
   const char *ws;
   const struct policy *policy;
-  bool net;         // host net ns: TCP 443, DNS (UDP 53), resolv.conf
-  int landlock_abi; // landlock_abi()
+  bool net;              // host net ns: TCP 443, DNS (UDP 53), resolv.conf
+  int landlock_abi;      // landlock_abi()
+  char *const *pass_env; // --env NAMEs handed to the agent, nullptr-ended
 };
 
 // Runs argv[0] (looked up in the role's env/bin) in a jail: clone3 into a

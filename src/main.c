@@ -21,7 +21,8 @@
 [[noreturn]] static void usage(void) {
   fprintf(
       stderr,
-      "usage: escrow --role POLICY [--key KEY --roles FILE] [--net]\n"
+      "usage: escrow --role POLICY [--key KEY --roles FILE] [--net] [--env "
+      "NAME]\n"
       "              [--workspace DIR] [--state DIR] -- <cmd> [args...]\n"
       "       escrow list [--state DIR]\n"
       "       escrow review <id> [--key KEY] [--state DIR] [--roles FILE]\n"
@@ -32,6 +33,7 @@
       "  --key KEY        SSH key that signs (with --roles: run proposes)\n"
       "  --roles FILE     who may request, review, sign ($ESCROW_ROLES)\n"
       "  --net            share the host network (TCP 443 and DNS only)\n"
+      "  --env NAME       hand host variable NAME to the agent (repeatable)\n"
       "  --workspace DIR  directory the command sees as /work (default: .)\n"
       "  --state DIR      where runs and the log live ($ESCROW_STATE)\n"
       "run exit: the command's status (128+N if killed by signal N),\n"
@@ -52,6 +54,7 @@ int main(int argc, char *argv[]) {
       {"key", required_argument, nullptr, 'k'},
       {"roles", required_argument, nullptr, 'R'},
       {"net", no_argument, nullptr, 'n'},
+      {"env", required_argument, nullptr, 'e'},
       {"workspace", required_argument, nullptr, 'w'},
       {"state", required_argument, nullptr, 's'},
       {},
@@ -66,7 +69,10 @@ int main(int argc, char *argv[]) {
   static struct roles roles;
   struct changes_writer cw;
   struct run run;
-  struct jail j = {.run = &run, .ws = wsreal, .policy = &policy};
+  struct jail j = {
+      .run = &run, .ws = wsreal, .policy = &policy, .pass_env = nullptr};
+  static char *pass_env[17];
+  size_t npass = 0;
   int c;
 
   // A closed stdout must be EPIPE, not death mid-walk or mid-apply (see
@@ -95,6 +101,15 @@ int main(int argc, char *argv[]) {
     case 'n':
       j.net = true;
       break;
+    case 'e':
+      if (npass == sizeof pass_env / sizeof *pass_env - 1)
+        errx(2, "at most %zu --env", npass);
+      if (strspn(optarg, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                         "0123456789_") != strlen(optarg) ||
+          !*optarg)
+        errx(2, "--env takes a variable name, got %s", optarg);
+      pass_env[npass++] = optarg;
+      break;
     case 'w':
       ws = optarg;
       break;
@@ -107,6 +122,7 @@ int main(int argc, char *argv[]) {
   }
   if (optind >= argc || !role)
     usage();
+  j.pass_env = pass_env;
   if (!state || !*state)
     errx(2, "no state dir: pass --state DIR or set ESCROW_STATE");
   // Fail closed: under --net only Landlock (with seccomp keeping sockets
