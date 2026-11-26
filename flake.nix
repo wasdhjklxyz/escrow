@@ -108,8 +108,9 @@
             ];
           };
 
-          # A real coding agent: Claude Code, run with --net and
-          # --env ANTHROPIC_API_KEY. Unfree, so only that package is allowed.
+          # A real coding agent: Claude Code, run with --net and --env
+          # CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY. Unfree, so only that
+          # package is allowed.
           role-claude =
             let
               unfree = import nixpkgs {

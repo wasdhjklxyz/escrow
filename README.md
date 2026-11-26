@@ -18,8 +18,10 @@ The on-disk formats: [`docs/FORMATS.md`](docs/FORMATS.md).
 
 ## Requirements
 
-Linux >= 6.8 with unprivileged user namespaces and Landlock, run as a
-normal user (escrow refuses root). `--net` needs Landlock ABI >= 10.
+Linux >= 6.8 with unprivileged user namespaces, run as a normal user
+(escrow refuses root). Without Landlock, escrow warns loudly and runs
+with namespaces and pivot_root only; `--net` needs Landlock ABI >= 10.
+Helper tools: coreutils, diffutils, openssh (the flake wraps them in).
 Nix with flakes, its build sandbox on (the default). On Ubuntu 24.04:
 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`.
 
@@ -57,11 +59,12 @@ escrow list
 escrow review <id> --key bob      # what apply will write; bob signs
 escrow review <id> --closures     # + nix store diff-closures (builds on this host)
 escrow sign <id> --key carol      # a third person approves
-escrow apply <id> --key carol     # atomic, refuses if the workspace moved
+escrow apply <id> --key carol     # atomic swap; refuses if the workspace moved
 escrow verify-log                 # offline: chain, signatures, SoD
 ```
 
-Without `--key`, a run just prints the diff and changes nothing. The
+Without `--key`, a run just prints the diff and leaves the workspace
+alone (the run dir is still kept under `<state>/runs/`). The
 agent's own output goes to `<state>/runs/<id>/log`, never to escrow's
 stdout.
 
