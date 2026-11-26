@@ -24,14 +24,15 @@ make it an organizational tool rather than a single-developer one:
 2. **Signed decisions.** Every step is an SSH signature (`ssh-keygen -Y`)
    in its own namespace, over the exact bytes of the proposal record (apply
    signs a statement naming that record and the tree it produced). An
-   auditor verifies the whole history offline with `ssh-keygen` and
-   `sha256sum`.
+   auditor checks the chain, every signature and the record and change-set
+   hashes offline with `ssh-keygen` and `sha256sum`; checking a tree
+   against `base`/`post` needs the tree-hash serializer in FORMATS.md.
 3. **Nix provenance.** The agent can only execute what is in its role's
    Nix closure; the record lists every store path. `/work` and `/tmp` are
    noexec and memfd exec is blocked, so store paths are the only
    executable files.
 4. **Diff systems, not just repos.** When the workspace is a NixOS flake,
-   `review --closures` adds `nix store diff-closures` to the file diff:
+   `review --closures` (or `sign --closures`) adds `nix store diff-closures` to the file diff:
    the package-level changes the approval makes to the running system.
    It is advisory (names come from the evaluated Nix, and it is not
    signed); the file diff is what gets applied.
@@ -59,15 +60,15 @@ escrow --role POLICY --key KEY --workspace W -- <agent ...>
       identity uid map; max_user_namespaces=0
       root = tmpfs: role closure bound ro, overlay(lower=W) at /work,
              noexec /tmp, minimal /dev, fresh /proc; pivot_root
-      agent: no caps, clean env, setsid, stdin /dev/null, stdout+stderr
-             to <run>/log, NO_NEW_PRIVS, Landlock, seccomp, exec
+      agent: no caps, clean env, setsid, NO_NEW_PRIVS, Landlock, seccomp,
+             stdin /dev/null, stdout+stderr to <run>/log, exec
   after the agent: the overlay upper dir is the change set
     diff walk -> frozen <run>/changes (payloads included)
     record (base tree hash, change-set hash, roles hash, closure, --net,
             --env names) -> requester signs
 escrow review <id> --key BOB    # rendered from the change set; bob signs
 escrow sign   <id> --key CAROL  # carol, a third principal, signs
-escrow apply  <id> --key CAROL  # stage a copy, re-check base, apply, swap atomically
+escrow apply  <id> --key CAROL  # stage a copy, apply, sign, re-check base, swap atomically
 escrow verify-log               # chain + every signature + SoD, offline
 ```
 
@@ -84,12 +85,13 @@ signing), and the audit trail.
 
 - *A malicious or prompt-injected agent* controls everything inside the
   jail. It can't write or read the host filesystem (pivot_root plus
-  Landlock), reach the network (empty net ns; under `--net`, TCP 443 and
-  DNS only), see host processes, IPC or keyrings (pid/ipc namespaces,
-  seccomp), regain capabilities (identity map, no nested user ns), run
-  binaries outside its closure (noexec, memfd blocked), or inject into the
-  review (its output never shares the diff's stream; every path, link
-  target, record field and file content shown is escaped).
+  Landlock), reach the network (empty net ns; under `--net`, TCP port 443
+  and UDP port 53 only, to any address), see host processes, IPC or
+  keyrings (pid/ipc namespaces, seccomp), regain capabilities (identity
+  map, no nested user ns), run binaries outside its closure (noexec, memfd
+  blocked), or inject into the review (its output never shares the diff's
+  stream; paths, link targets and file content are escaped, and record
+  fields and log lines are refused unless printable ASCII).
 - *A malicious requester* holds their own key and can hand-craft run
   directories, records, change sets, even append log lines. Separation of
   duties still holds because review and sign need other people's keys;
@@ -100,7 +102,7 @@ signing), and the audit trail.
 **Not defended (limitations):**
 
 - **Exfiltration through allowed channels.** With `--net`, anything the
-  agent can read (the workspace) can leave through TCP 443 or DNS. No
+  agent can read (the workspace) can leave through TCP 443 or UDP 53. No
   kernel jail can tell a legitimate API call from a leak.
 - **Review-time Nix (`--closures`).** Building the closure diff evaluates
   and builds Nix the agent wrote, on the reviewer's host. escrow refuses
@@ -118,11 +120,17 @@ signing), and the audit trail.
 - **Truncation.** The log is hash-chained, not witnessed. Edits and
   reordering are caught; cutting off the tail is only visible against a
   head hash kept elsewhere.
-- **Roles rotation.** Each proposal pins the roles file it was made under;
-  verifying old history needs the old roles file.
+- **Roles rotation.** Each proposal and log line pins the roles file it
+  was made under, and `verify-log` takes one roles file: a log that spans
+  a roles change can't be verified in one pass today.
+- **A write racing apply.** apply checks the workspace against `base`
+  after the signer signs, then swaps. A write in the instant between is
+  not lost (escrow keeps the old tree and says where) but the apply has
+  already happened.
 - **Review is a human.** escrow shows the reviewer exactly what will be
-  applied, escaped and complete, including a binary file's hash, but
-  can't make them read it.
+  applied, escaped, with a binary file's hash, xattr values as hashes and
+  up to 200 entries of a recursive delete (then a count), but can't make
+  them read it.
 
 ## Where this goes
 
@@ -147,15 +155,24 @@ signing), and the audit trail.
 The jail is built from standard Linux mechanisms (user, mount and pid
 namespaces, overlayfs, pivot_root, Landlock, seccomp) in the same way
 bubblewrap, container runtimes and the sandboxes above use them; escrow
-implements them directly in C with no dependencies beyond libc. New here:
+implements them directly in C with no library beyond libc (it runs
+coreutils, diffutils, `ssh-keygen` and, for `--closures`, `nix`). New here:
 the frozen, signed change set; enforced separation of duties; the
 offline-verifiable hash-chained log; the attested Nix closure; and
 system-level review through the closure diff.
 
 ## AI usage
 
-escrow was written with Claude Code: the design decisions and reviews were
-human, the implementation largely agent-written and then reviewed by
-independent reviewer agents (correctness, offensive security, minimalism,
-style, maintainability) in several rounds. Every agent-written commit
-carries a `Co-Authored-By` trailer.
+escrow was written with Claude Code. I wrote the spec (the twist, the
+architecture, constraints, milestones and cut order) and defined the
+workflow: the agent implemented each milestone, then independent reviewer
+agents (correctness, offensive security with working proofs of concept,
+minimalism, style, maintainability) attacked it, and every finding was
+fixed with a regression test, over at least two rounds per milestone. For
+the first two milestones I made the design calls (the supervisor never
+enters the jail, clone3 into an init we control, the identity uid map,
+the new mount API) and the agent wrote the code. From the third milestone
+on I delegated design decisions to the agent as well; the judgment calls
+it made were surfaced for me afterwards. I ran the end-to-end demo with a
+real coding agent myself. All code is agent-written, and every
+agent-written commit carries a `Co-Authored-By` trailer.

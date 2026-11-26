@@ -1,7 +1,9 @@
 # escrow on-disk formats
 
 What an auditor needs to check a state dir without trusting the escrow
-binary: `sha256sum` and OpenSSH `ssh-keygen -Y` (OpenSSH ≥ 8.9) are enough.
+binary: `sha256sum` and OpenSSH `ssh-keygen -Y` (OpenSSH ≥ 8.9) check the
+chain, the signatures and the record/change-set hashes. Checking a tree
+against `base` or `post` also needs the tree-hash serializer below.
 Version 1 of every format.
 
 ## State dir
@@ -39,7 +41,9 @@ One principal per line; `#` comments and blank lines are ignored:
 
 The equivalent allowed_signers file is `<principal> <keytype> <base64>` per
 line. Every record and log line pins the sha256 of the roles file it was
-made under; verifying needs that same file (keep old versions).
+made under; verifying needs that same file (keep old versions). `escrow
+verify-log` takes one roles file, so a log spanning a roles change needs
+an independent verifier today.
 
 ## Record (`record`)
 
@@ -87,15 +91,18 @@ xattr  = "x <namelen> <vallen>\n" name value
 - mode: octal, no leading zeros, ≤ 07777, never setuid/setgid; sticky only
   on `d`/`r`. Lengths decimal, no leading zeros. Single spaces. Header
   line ≤ 80 bytes.
-- path: relative; components non-empty, not `.` or `..`; no leading,
-  trailing or doubled `/`; < 4096 bytes.
+- path: relative; components non-empty, ≤ 255 bytes, not `.` or `..`; no
+  leading, trailing or doubled `/`; < 4096 bytes.
 - Entries strictly increasing in walk order: compare paths component by
   component with strcmp (bytewise); an ancestor sorts before its
   descendants. So no path appears twice; `r` can only be first.
 - xattrs: only on `r`/`d`/`f`; names `user.*` but not `user.overlay.*`,
-  ≤ 255 bytes, each name once; values ≤ 64 KiB.
-- `d`/`f`/`l`/`p` replace whatever is at the path; `D` entries under a
-  path already deleted or replaced are omitted.
+  ≤ 255 bytes, each name once; values ≤ 64 KiB. An entry's `x` lines are
+  its complete `user.*` set: apply removes any others.
+- `f`/`l`/`p` replace whatever is at the path. `d` makes a dir (replacing
+  a non-dir) or keeps an existing one with its contents, then sets its
+  mode and xattrs after all entries. `D` entries under a path already
+  deleted or replaced are omitted.
 
 ## Tree hash (`base`, apply's `post`)
 
@@ -117,7 +124,8 @@ sticky included). path is relative to the tree root, `a/b` (no trailing
 
 ## Log (`log`)
 
-One line per event, fields separated by one space, ≤ 1023 bytes:
+One line per event, fields separated by one space, every byte printable
+ASCII (0x20–0x7e), ≤ 1023 bytes:
 
 ```
 <seq> <time> <event> <id> <principal> <record-sha> <sig-sha> <extra> <roles-sha> <prev>
@@ -155,11 +163,13 @@ prev <prev of the apply log line>
 ## What verify-log checks, and what it can't
 
 For every line: seq and prev chain; each step once per id and in order
-(propose < review < sign < apply); record and change-set hashes; the
-signature file's hash; the signature under the event's namespace; the
-principal's role; requester ≠ reviewer ≠ signer; the apply statement.
+(propose < review < sign < apply); the line's and the record's roles hash
+equal the roles file given; record and change-set hashes; the signature
+file's hash; the signature under the event's namespace; the principal's
+role; requester ≠ reviewer ≠ signer; the apply statement.
 
 The chain is unkeyed. Anyone who can write the state dir can truncate the
 log, or rebuild it from their own proposals; signatures still bind what
 each person signed, but a truncation is only visible against a head hash
-kept elsewhere (verify-log prints it). The time fields are not signed.
+kept elsewhere (verify-log prints it). Log-line times are not signed; the
+record's `time` is signed, but it comes from the requester's clock.
