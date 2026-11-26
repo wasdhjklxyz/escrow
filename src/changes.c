@@ -171,7 +171,7 @@ static bool path_ok(const char *p, size_t len) {
     return false;
   for (const char *c = p; *c;) {
     size_t n = strcspn(c, "/");
-    if (n == 0 || (n == 1 && c[0] == '.') ||
+    if (n == 0 || n > NAME_MAX || (n == 1 && c[0] == '.') ||
         (n == 2 && c[0] == '.' && c[1] == '.'))
       return false;
     c += n;

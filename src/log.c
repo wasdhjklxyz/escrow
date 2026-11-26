@@ -64,6 +64,11 @@ void log_open(struct log *l, const char *state, bool writer) {
     lineno++;
     if (!strchr(text, '\n'))
       errx(1, "%s:%zu: line too long or unterminated", path, lineno);
+    // A requester can append lines, and list prints fields as they are:
+    // no byte that a terminal would act on.
+    for (const char *c = text; *c != '\n'; c++)
+      if (*c < 0x20 || *c > 0x7e)
+        errx(1, "%s:%zu: non-printable byte in line", path, lineno);
     if (sscanf(text, "%lu %31s %15s %15s %71s %64s %64s %64s %64s %64s%c",
                &line.seq, line.time, line.event, line.id, line.principal,
                line.record, line.sig, line.extra, line.roles, line.prev,

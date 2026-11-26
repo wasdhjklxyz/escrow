@@ -21,7 +21,7 @@
 [[noreturn]] static void usage(void) {
   fprintf(
       stderr,
-      "usage: escrow --role POLICY [--key KEY --roles FILE] [--net] [--env "
+      "usage: escrow --role POLICY [--key KEY [--roles FILE]] [--net] [--env "
       "NAME]\n"
       "              [--workspace DIR] [--state DIR] -- <cmd> [args...]\n"
       "       escrow list [--state DIR]\n"
@@ -32,9 +32,9 @@
       "       escrow apply <id> --key KEY [--state DIR] [--roles FILE]\n"
       "       escrow verify-log [--state DIR] [--roles FILE]\n"
       "  --role POLICY    role policy file (nix build .#role-<name>)\n"
-      "  --key KEY        SSH key that signs (with --roles: run proposes)\n"
+      "  --key KEY        SSH key that signs (a run with --key proposes)\n"
       "  --roles FILE     who may request, review, sign ($ESCROW_ROLES)\n"
-      "  --net            share the host network (TCP 443 and DNS only)\n"
+      "  --net            share the host network (TCP 443, UDP 53 only)\n"
       "  --env NAME       hand host variable NAME to the agent (repeatable)\n"
       "  --workspace DIR  directory the command sees as /work (default: .)\n"
       "  --state DIR      where runs and the log live ($ESCROW_STATE)\n"
@@ -106,7 +106,8 @@ int main(int argc, char *argv[]) {
     case 'e':
       if (npass == sizeof pass_env / sizeof *pass_env - 1)
         errx(2, "at most %zu --env", npass);
-      if (!*optarg ||
+      // <= 63: 16 names and their spaces always fit the record's env line.
+      if (!*optarg || strlen(optarg) > 63 ||
           strspn(optarg, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
                          "0123456789_") != strlen(optarg))
         errx(2, "--env takes a variable name, got %s", optarg);

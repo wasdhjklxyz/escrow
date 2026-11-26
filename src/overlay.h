@@ -14,8 +14,8 @@ struct run {
 };
 
 // Host side, before clone3. Creates <state>/runs/<id>/{upper,work,root}
-// (0700). Runs are kept after the run, and nothing deletes them yet
-// (cleanup comes with M3's proposal lifecycle). Exits with status 1 if ws
+// (0700). Runs are kept after the run and nothing deletes them: record,
+// changes and signatures are audit evidence (docs/FORMATS.md). Exits 1 if ws
 // isn't a directory, if the state dir would land inside the workspace, or
 // on any syscall failure. The checks run before anything is created, so a
 // refused run leaves the workspace untouched. ws must be realpath() output.

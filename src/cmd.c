@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -70,7 +71,9 @@ void propose(const struct propose *p, const struct run *run, int status,
   char envs[1024] = "";
   for (char *const *e = p->pass_env; e && *e; e++) {
     size_t len = strlen(envs);
-    snprintf(envs + len, sizeof envs - len, "%s%s", len ? " " : "", *e);
+    int n = snprintf(envs + len, sizeof envs - len, "%s%s", len ? " " : "", *e);
+    if (n < 0 || (size_t)n >= sizeof envs - len)
+      errx(1, "--env names too long for the record");
   }
   r.env = envs;
   if (!realpath("/proc/self/exe", exe))
@@ -250,6 +253,19 @@ static FILE *base_copy(int root, const char *path) {
   return t;
 }
 
+static bool has_nul(FILE *f) {
+  char buf[1 << 16];
+  size_t n;
+  bool nul = false;
+  rewind(f);
+  while (!nul && (n = fread(buf, 1, sizeof buf, f)) > 0)
+    nul = memchr(buf, '\0', n) != nullptr;
+  if (ferror(f))
+    err(1, "read tmpfile");
+  rewind(f);
+  return nul;
+}
+
 static void show_content(int root, const struct change *c) {
   char a[64], b[64], sha[SHA256_HEX + 1];
 
@@ -259,6 +275,13 @@ static void show_content(int root, const struct change *c) {
     return;
   }
   FILE *base = base_copy(root, c->path);
+  // A binary base makes diff print only "Binary files differ", which
+  // would hide the new text. Show it in full instead, as an addition.
+  if (base && has_nul(base)) {
+    printf("    replaces a binary file; the new content in full:\n");
+    fclose(base);
+    base = nullptr;
+  }
   FILE *next = temp_with(c->data, c->len);
   FILE *out = tmpfile();
   if (!out)
@@ -334,6 +357,37 @@ static void show_xattrs(const struct change *c) {
   }
 }
 
+// user.* xattrs on the live entry that the change doesn't list: apply
+// removes them (apply.c: set_xattrs), so review must say so.
+static void show_removed_xattrs(int root, const struct change *c) {
+  static char names[XATTR_LIST_MAX];
+
+  if (c->op != 'f' && c->op != 'd' && c->op != 'r')
+    return;
+  int fd = open_beneath(root, c->path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+  if (fd < 0) {
+    if (errno != ENOENT && errno != ELOOP) // ELOOP: a symlink, no xattrs
+      printf("    current xattrs unreadable: %s\n", strerror(errno));
+    return;
+  }
+  ssize_t n = flistxattr(fd, names, sizeof names);
+  if (n < 0)
+    printf("    current xattrs unreadable: %s\n", strerror(errno));
+  for (char *p = names; n > 0 && p < names + n; p += strlen(p) + 1) {
+    if (strncmp(p, "user.", 5) != 0)
+      continue;
+    bool kept = false;
+    for (size_t i = 0; i < c->nx && !kept; i++)
+      kept = strcmp(c->x[i].name, p) == 0;
+    if (!kept) {
+      char *q = record_quoted(p);
+      printf("    xattr %s removed\n", q);
+      free(q);
+    }
+  }
+  close(fd);
+}
+
 // What the signer approves, rendered from the change set (never from
 // upper/ or any stored text) against the workspace as it is now.
 static void render(const struct proposal *p, bool closures) {
@@ -344,8 +398,8 @@ static void render(const struct proposal *p, bool closures) {
          "role-env  %s\n  base      %s\n"
          "  changes   %s\n",
          p->rec.id, p->requester->name, p->rec.time, p->rec.cmd, p->rec.exit,
-         p->rec.net ? "yes (TCP 443, DNS)" : "no", p->rec.env, p->rec.workspace,
-         p->rec.role_env, p->rec.base, p->rec.changes);
+         p->rec.net ? "yes (TCP 443, UDP 53)" : "no", p->rec.env,
+         p->rec.workspace, p->rec.role_env, p->rec.base, p->rec.changes);
   if (p->reviewer)
     printf("  reviewer  %s\n", p->reviewer->name);
   if (p->signer)
@@ -392,6 +446,8 @@ static void render(const struct proposal *p, bool closures) {
       }
       putchar('\n');
       show_xattrs(c);
+      if (exists)
+        show_removed_xattrs(root, c);
       if (exists && S_ISDIR(st.st_mode) && c->op != 'd' && c->op != 'r')
         show_deletions(root, c->path);
       if (c->op == 'f')
@@ -613,10 +669,6 @@ int cmd_apply(int argc, char *argv[]) {
     remove_dir(stage);
     errx(1, "apply failed; the workspace is untouched");
   }
-  if (!tree_hash(ws, now) || strcmp(now, p.rec.base) != 0) {
-    remove_dir(stage);
-    errx(1, "%s: the workspace moved during apply; nothing changed", ws);
-  }
 
   unsigned long seq = log_next_seq(&log);
   char text[512];
@@ -632,6 +684,15 @@ int cmd_apply(int argc, char *argv[]) {
     errx(1, "%s may not apply: needs a signer who didn't request it",
          who->name);
   }
+  // After signing: it can wait on a passphrase or a key touch, and a write
+  // to the workspace during that wait must refuse the apply, not vanish
+  // with the old tree.
+  if (!tree_hash(ws, now) || strcmp(now, p.rec.base) != 0) {
+    unlink(sig);
+    unlink(stmt);
+    remove_dir(stage);
+    errx(1, "%s: the workspace moved during apply; nothing changed", ws);
+  }
   if (renameat2(AT_FDCWD, stage, AT_FDCWD, ws, RENAME_EXCHANGE) < 0) {
     int e = errno;
     unlink(sig);
@@ -645,7 +706,14 @@ int cmd_apply(int argc, char *argv[]) {
   struct log_line line = step_line(EV_APPLY, &p, who, sig, &roles);
   strcpy(line.extra, post);
   log_append(&log, &line);
-  remove_dir(stage); // the old tree now
+  // stage is the old tree now. A write that landed between the last check
+  // and the swap is in it: keep it rather than delete someone's work.
+  if (!tree_hash(stage, now) || strcmp(now, p.rec.base) != 0)
+    warnx("%s: the workspace changed just before the swap; the old tree, "
+          "with that change, is kept at %s",
+          ws, stage);
+  else
+    remove_dir(stage);
   warnx("applied %s as %s", o.id, who->name);
   return 0;
 }
