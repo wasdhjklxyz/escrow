@@ -1,4 +1,5 @@
 #!/bin/sh
+# FIXED in e851040 (--closures is opt-in, refuses fixed-output builds, needs sandbox=true).
 # PoC: `escrow review` executes agent-controlled Nix builders on the
 # reviewer's host. The agent (controls the change set) ships a flake.nix
 # whose nixosConfigurations.<cfg>.config.system.build.toplevel is an
