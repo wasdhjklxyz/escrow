@@ -114,12 +114,14 @@ void overlay_prepare(struct run *run, const char *state, const char *ws) {
   mkdir_new(run->dir, "root", run->root);
   join(run->dir, "log", run->log);
 
+  // Xattrs first: setting one needs write access, which a 0555 mode
+  // would take away.
+  copy_root_xattrs(ws, run->upper);
   // The overlay root takes its attributes from upper's root. Match the
   // workspace root so the agent sees the right mode and the diff can
   // report a chmod of it. The 0700 run dir still keeps others out.
   if (chmod(run->upper, st.st_mode & ALLPERMS) < 0)
     err(1, "chmod %s", run->upper);
-  copy_root_xattrs(ws, run->upper);
 }
 
 static int fsconfig_string(int fsfd, const char *key, const char *val) {
