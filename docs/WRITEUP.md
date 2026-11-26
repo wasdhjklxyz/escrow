@@ -167,12 +167,13 @@ escrow was written with Claude Code. I wrote the spec (the twist, the
 architecture, constraints, milestones and cut order) and defined the
 workflow: the agent implemented each milestone, then independent reviewer
 agents (correctness, offensive security with working proofs of concept,
-minimalism, style, maintainability) attacked it, and every finding was
-fixed with a regression test, over at least two rounds per milestone. For
-the first two milestones I made the design calls (the supervisor never
-enters the jail, clone3 into an init we control, the identity uid map,
-the new mount API) and the agent wrote the code. From the third milestone
-on I delegated design decisions to the agent as well; the judgment calls
-it made were surfaced for me afterwards. I ran the end-to-end demo with a
-real coding agent myself. All code is agent-written, and every
-agent-written commit carries a `Co-Authored-By` trailer.
+minimalism, style, maintainability) attacked it. Every finding was either
+fixed with a regression test or documented as a limit, over at least two
+rounds per milestone. For the first two milestones I made the design
+calls (the supervisor never enters the jail, clone3 into an init we
+control, the identity uid map, the new mount API) and the agent wrote
+the code. From the third milestone on I delegated design decisions to
+the agent as well; the judgment calls it made were surfaced for me
+afterwards. I ran the end-to-end demo with a real coding agent myself.
+All code is agent-written, and every agent-written commit carries a
+`Co-Authored-By` trailer.

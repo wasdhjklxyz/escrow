@@ -382,6 +382,40 @@ refused "apply: a write while the signer types a passphrase refuses it" \
   SSH_ASKPASS_REQUIRE=force DISPLAY=:0 \
   "$escrow" apply "$pw" --key frank --roles roles.f
 check "apply: that write survives" [ "$(cat ws4/colleague)" = colleague ]
+check "apply: a refused apply leaves no stage or statement" sh -c \
+  '! ls -d .ws4.escrow-* 2>/dev/null && ! ls "$1"/*-apply* 2>/dev/null' _ \
+  "$ESCROW_STATE/runs/$pw"
+
+"$escrow" --role "$policy" --workspace ws4 --key alice --roles roles.f -- \
+  sh -c 'echo v3 >f' >/dev/null 2>&1
+pz=$(last_id)
+must "bob reviews pz" "$escrow" review "$pz" --key bob --roles roles.f
+must "carol signs pz" "$escrow" sign "$pz" --key carol --roles roles.f
+printf '#!/bin/sh\necho wrong\n' >askpass-bad
+chmod +x askpass-bad
+refused "apply: a wrong passphrase refuses it" "sign failed" \
+  env SSH_ASKPASS="$tmp/askpass-bad" SSH_ASKPASS_REQUIRE=force DISPLAY=:0 \
+  "$escrow" apply "$pz" --key frank --roles roles.f
+printf '#!/bin/sh\necho pw\n' >askpass-ok
+chmod +x askpass-ok
+must "apply: the retry after a failed signature goes through" \
+  env SSH_ASKPASS="$tmp/askpass-ok" SSH_ASKPASS_REQUIRE=force DISPLAY=:0 \
+  "$escrow" apply "$pz" --key frank --roles roles.f
+check "apply: the retry applied" [ "$(cat ws4/f)" = v3 ]
+
+echo g >ws4/g
+setfattr -n user.k -v v ws4/g
+"$escrow" --role "$policy" --workspace ws4 --key alice --roles roles.f -- \
+  sh -c 'rm g; mkfifo g' >/dev/null 2>&1
+"$escrow" review "$(last_id)" --roles roles.f >review6.out 2>&1
+check "review: a file replaced by a fifo shows its xattr removal" \
+  grep -q 'xattr user.k removed' review6.out
+
+mkdir ws5
+setfattr -n user.a -v b ws5
+chmod 555 ws5
+check "run: a read-only workspace root with an xattr" \
+  "$escrow" --role "$policy" --workspace ws5 -- true
 
 refused "--env: a name over 63 bytes" "takes a variable name" \
   "$escrow" --role "$policy" --workspace ws4 --env "$long" -- true

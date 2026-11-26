@@ -362,8 +362,6 @@ static void show_xattrs(const struct change *c) {
 static void show_removed_xattrs(int root, const struct change *c) {
   static char names[XATTR_LIST_MAX];
 
-  if (c->op != 'f' && c->op != 'd' && c->op != 'r')
-    return;
   int fd = open_beneath(root, c->path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
   if (fd < 0) {
     if (errno != ENOENT && errno != ELOOP) // ELOOP: a symlink, no xattrs
@@ -620,6 +618,22 @@ static void write_statement(const char *path, const char *text) {
     err(1, "write %s", path);
 }
 
+// What a failed apply leaves behind until the swap: the stage dir, the
+// statement and its signature. Any of them would block every retry.
+static struct undo {
+  char stage[PATH_MAX], stmt[PATH_MAX], sig[PATH_MAX];
+} undo;
+
+static void undo_apply(void) {
+  struct stat st;
+  if (*undo.sig)
+    unlink(undo.sig);
+  if (*undo.stmt)
+    unlink(undo.stmt);
+  if (*undo.stage && lstat(undo.stage, &st) == 0)
+    remove_dir(undo.stage);
+}
+
 int cmd_apply(int argc, char *argv[]) {
   struct args o;
   static struct roles roles; // static: reachable at exit, for LeakSanitizer
@@ -654,52 +668,45 @@ int cmd_apply(int argc, char *argv[]) {
   struct stat st;
   if (lstat(stage, &st) == 0)
     errx(1, "%s exists (left by a failed apply?); remove it first", stage);
+  // From here until the swap, every exit (any errx, a failed or refused
+  // signature included) goes through undo_apply.
+  strcpy(undo.stage, stage);
+  if (atexit(undo_apply) != 0)
+    errx(1, "atexit");
   char *cp[] = {"cp",       "-a",  "--no-target-directory",
                 (char *)ws, stage, nullptr};
   if (run_cmd(cp, -1, -1) != 0)
     errx(1, "copy %s to %s failed", ws, stage);
   // The copy must be the reviewed base: a writer that changed the workspace
   // during the copy and changed it back would slip past the checks on ws.
-  if (!tree_hash(stage, now) || strcmp(now, p.rec.base) != 0) {
-    remove_dir(stage);
+  if (!tree_hash(stage, now) || strcmp(now, p.rec.base) != 0)
     errx(1, "%s: changed while being copied; nothing applied", ws);
-  }
   umask(0); // belt and braces: apply.c sets every mode explicitly anyway
-  if (apply_changes(&p.cs, stage) < 0 || !tree_hash(stage, post)) {
-    remove_dir(stage);
+  if (apply_changes(&p.cs, stage) < 0 || !tree_hash(stage, post))
     errx(1, "apply failed; the workspace is untouched");
-  }
 
   unsigned long seq = log_next_seq(&log);
   char text[512];
   statement_path(stmt, p.dir, seq);
   statement(text, p.rec.id, p.record_sha, post, log_hash_at(&log, log.n));
   write_statement(stmt, text);
+  strcpy(undo.stmt, stmt);
   sig_path(sig, p.dir, seq, EV_APPLY);
   const struct principal *who = sig_create(&roles, o.key, NS_APPLY, stmt, sig);
-  if (!(who->roles & ROLE_SIGNER) || who == p.requester) {
-    unlink(sig);
-    unlink(stmt);
-    remove_dir(stage);
+  strcpy(undo.sig, sig);
+  if (!(who->roles & ROLE_SIGNER) || who == p.requester)
     errx(1, "%s may not apply: needs a signer who didn't request it",
          who->name);
-  }
   // After signing: it can wait on a passphrase or a key touch, and a write
   // to the workspace during that wait must refuse the apply, not vanish
-  // with the old tree.
-  if (!tree_hash(ws, now) || strcmp(now, p.rec.base) != 0) {
-    unlink(sig);
-    unlink(stmt);
-    remove_dir(stage);
+  // with the old tree. The stage is re-checked against the signed post.
+  if (!tree_hash(ws, now) || strcmp(now, p.rec.base) != 0)
     errx(1, "%s: the workspace moved during apply; nothing changed", ws);
-  }
-  if (renameat2(AT_FDCWD, stage, AT_FDCWD, ws, RENAME_EXCHANGE) < 0) {
-    int e = errno;
-    unlink(sig);
-    unlink(stmt);
-    remove_dir(stage);
-    (errno = e), err(1, "renameat2 RENAME_EXCHANGE %s", ws);
-  }
+  if (!tree_hash(stage, now) || strcmp(now, post) != 0)
+    errx(1, "%s: changed after apply; nothing changed", stage);
+  if (renameat2(AT_FDCWD, stage, AT_FDCWD, ws, RENAME_EXCHANGE) < 0)
+    err(1, "renameat2 RENAME_EXCHANGE %s", ws);
+  undo = (struct undo){}; // swapped: the apply happened
   // Swap, then log. A crash in between leaves the workspace applied with no
   // apply line: verify-log still passes (the log never claims it), apply
   // refuses a retry (base moved), and <run>/<seq>-apply + .sig show it.
