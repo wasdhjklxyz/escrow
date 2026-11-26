@@ -1,4 +1,5 @@
 #!/bin/sh
+# FIXED in 350d952 (record_read refuses non-printable bytes; output goes through print_escaped).
 # PoC: terminal-escape injection into `escrow review` / `escrow sign` output
 # through unsanitized record header fields (cmd / time / role-env).
 #
