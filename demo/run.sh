@@ -26,7 +26,7 @@ for u in alice bob carol; do
   ssh-keygen -q -t ed25519 -N '' -C "$u" -f "$d/$u"
 done
 cat >"$d/roles" <<EOF
-alice requester $(pub alice)
+alice requester,reviewer $(pub alice)
 bob reviewer $(pub bob)
 carol signer $(pub carol)
 EOF
