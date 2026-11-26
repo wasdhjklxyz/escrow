@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 static void join(const char *dir, const char *name, char out[PATH_MAX]) {
@@ -59,6 +60,28 @@ static void mkdir_new(const char *dir, const char *name, char out[PATH_MAX]) {
     err(1, "mkdir %s", out);
 }
 
+// The overlay root takes its xattrs from upper's root, as it does its
+// mode. Copy the workspace root's user.* ones (not overlay's own), or a
+// run that changes nothing would propose removing them.
+static void copy_root_xattrs(const char *ws, const char *upper) {
+  static char names[XATTR_LIST_MAX], val[XATTR_SIZE_MAX];
+
+  ssize_t n = listxattr(ws, names, sizeof names);
+  if (n < 0 && errno == ENOTSUP)
+    return;
+  if (n < 0)
+    err(1, "listxattr %s", ws);
+  for (char *p = names; p < names + n; p += strlen(p) + 1) {
+    if (strncmp(p, "user.", 5) != 0 || strncmp(p, "user.overlay.", 13) == 0)
+      continue;
+    ssize_t vl = getxattr(ws, p, val, sizeof val);
+    if (vl < 0)
+      err(1, "getxattr %s %s", ws, p);
+    if (setxattr(upper, p, val, (size_t)vl, XATTR_CREATE) < 0)
+      err(1, "setxattr %s %s", upper, p);
+  }
+}
+
 void overlay_prepare(struct run *run, const char *state, const char *ws) {
   char path[PATH_MAX], runs[PATH_MAX];
   struct stat st;
@@ -96,6 +119,7 @@ void overlay_prepare(struct run *run, const char *state, const char *ws) {
   // report a chmod of it. The 0700 run dir still keeps others out.
   if (chmod(run->upper, st.st_mode & ALLPERMS) < 0)
     err(1, "chmod %s", run->upper);
+  copy_root_xattrs(ws, run->upper);
 }
 
 static int fsconfig_string(int fsfd, const char *key, const char *val) {

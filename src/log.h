@@ -33,7 +33,7 @@ struct log_line {
 };
 
 struct log {
-  int fd; // <state>/log, flock(LOCK_EX) held until exit
+  int fd; // <state>/log; flock held until exit (EX writers, SH readers)
   struct log_line *v;
   size_t n;
 };

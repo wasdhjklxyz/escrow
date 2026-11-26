@@ -30,8 +30,14 @@ static int open_parent(int root, const char *path, char name[NAME_MAX + 1]) {
   char dir[PATH_MAX];
   const char *slash = strrchr(path, '/');
 
-  snprintf(name, NAME_MAX + 1, "%s", slash ? slash + 1 : path);
-  snprintf(dir, sizeof dir, "%.*s", slash ? (int)(slash - path) : 0, path);
+  // Never cut a name short: that would touch a different entry.
+  int n = snprintf(name, NAME_MAX + 1, "%s", slash ? slash + 1 : path);
+  int m =
+      snprintf(dir, sizeof dir, "%.*s", slash ? (int)(slash - path) : 0, path);
+  if (n < 0 || n > NAME_MAX || m < 0 || m >= (int)sizeof dir) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
   return open_beneath(root, dir, O_PATH | O_DIRECTORY);
 }
 

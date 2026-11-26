@@ -19,8 +19,10 @@
 // never "." or "..", no leading, trailing or double '/'. Entries are
 // strictly increasing in walk order (per-component strcmp, a dir before
 // its children), so no path appears twice. Only user.* xattrs; no set-id
-// bits, no sticky bit except on dirs. d/f/l/p replace whatever is at the
-// path; D entries under an already deleted or replaced path are omitted.
+// bits, no sticky bit except on dirs. f/l/p replace whatever is at the
+// path; d makes a dir (replacing a non-dir) or keeps an existing one, then
+// sets its mode and xattrs. D entries under an already deleted or replaced
+// path are omitted.
 // Integers are canonical (octal mode, decimal lengths, single spaces);
 // limits: header line <= 80 bytes, path < PATH_MAX, xattr name <= 255,
 // value <= XATTR_SIZE_MAX. Full spec: docs/FORMATS.md.
