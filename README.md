@@ -2,23 +2,26 @@
 
 **Agents propose, humans sign.** escrow runs an AI agent (or any command)
 in a throwaway, Nix-pinned Linux jail and turns what it changed into a
-proposal. Nothing touches the real system until three different people
-request, review and sign it, and every step is an SSH signature in a
-hash-chained log an auditor can verify offline.
+proposal. Nothing is written to the real workspace until three different
+people request, review and sign it, and every step is an SSH signature in
+a hash-chained log an auditor can verify offline.
 
 Sandboxes for coding agents answer "can the agent hurt my machine?" for one
 developer. escrow answers the organization's question: **who asked, who
 checked, who approved, and can we prove it?**
 
 - **Separation of duties, enforced.** Requester, reviewer and signer are
-  different keys; a requester can never approve their own change.
+  different keys; a requester can never approve their own change (when the
+  requester can't write the workspace directly; see the threat model).
 - **Signed decisions.** Every proposal, review, signature and apply is an
-  SSH signature. The log verifies offline with `ssh-keygen` and `sha256sum`.
-- **Provenance.** The record pins the Nix store path of every tool the
-  agent could run.
+  SSH signature. The log verifies offline with `ssh-keygen` and `sha256sum`
+  (truncation shows only against a saved head hash).
+- **Provenance.** The record lists the Nix store path of every binary the
+  agent could exec, attested by the requester's signature.
 - **Systems, not just repos.** When the workspace is a NixOS config,
-  review shows the file diff and what the change does to the running
-  system (`nix store diff-closures`, e.g. `jq: +90 KiB`).
+  `review --closures` builds the base and proposed systems on the
+  reviewer's host and shows `nix store diff-closures` (package and size
+  changes, e.g. `jq: +90 KiB`).
 
 ## How it works
 
@@ -27,9 +30,10 @@ checked, who approved, and can we prove it?**
 
    jail ───────────► proposal ──────► review ───────► sign ─────────► apply
    user/mount/pid/   change set,      bob signs off   carol signs     atomic swap,
-   net/ipc ns,       record, and      on the exact    (never the      refused if W
-   Nix-closure root, alice's SSH      diff            requester)      moved since
-   Landlock, seccomp signature
+   ipc/uts/cgroup,   record, and      on the exact    (never the      refused if W
+   net unless --net, alice's SSH      diff            requester)      moved since
+   Nix-closure root, signature
+   Landlock, seccomp
         │                │                │              │               │
         └────────────────┴────────────────┴──────────────┴───────────────┘
                        hash-chained log  ──►  escrow verify-log
@@ -37,16 +41,17 @@ checked, who approved, and can we prove it?**
 
 | Layer | What it stops |
 |---|---|
-| Mount namespace + a root built from the role's Nix closure | Seeing host files: only the role's tools and `/work` exist |
+| Mount namespace + a root built from the role's Nix closure | Seeing host files: only the closure, `/work`, and a scratch `/tmp`, `/dev`, `/proc` exist |
 | Overlay on the workspace | Writing the real workspace: changes land in an upper dir that becomes the proposal |
-| Read-only root, `noexec` on `/work` and `/tmp`, Landlock | Writing outside `/work` and `/tmp`; running anything not in the closure |
+| Read-only root, `noexec` on `/work` and `/tmp`, Landlock | Writing outside `/work` and `/tmp`; exec'ing any file outside the closure (an interpreter in the closure can still run scripts the agent wrote) |
 | PID and IPC namespaces | Seeing or signalling host processes; host SysV IPC |
-| Network namespace (Landlock TCP/UDP rules with `--net`) | Any network by default; with `--net`, anything but TCP 443 and UDP 53 |
-| seccomp | io_uring, memfd exec, keyrings, non-IP sockets |
+| Network namespace; with `--net`, none (the host network, held by Landlock) | Any network by default; with `--net`, everything but TCP connect to port 443 and UDP to port 53, on any address, host loopback included |
+| seccomp | io_uring, memfd_create, keyrings, every socket but Unix, TCP and UDP, foreign-arch syscalls |
 
 What a kernel jail cannot stop (exfiltration through an allowed channel,
-kernel bugs, resource exhaustion) is in the
-[threat model](docs/WRITEUP.md#threat-model).
+kernel bugs) is in the [threat model](docs/WRITEUP.md#threat-model).
+escrow also sets no CPU, memory or disk limits: run it under cgroups
+(systemd, a container) if the agent might be hostile.
 
 ## Try it
 
@@ -97,13 +102,14 @@ goes to `<state>/runs/<id>/log`, never to escrow's stdout.
 - Linux ≥ 6.8 with unprivileged user namespaces, run as a normal user
   (escrow refuses root). On Ubuntu:
   `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`.
-- Landlock; without it escrow warns loudly and runs with namespaces and
-  pivot_root only. `--net` needs Landlock ABI ≥ 10.
+- Landlock; without it escrow warns loudly and runs without it
+  (namespaces, pivot_root, the read-only and noexec mounts and seccomp
+  still apply). `--net` needs Landlock ABI ≥ 10.
 - Nix with flakes and its build sandbox on (the default). The flake wraps
   the helpers escrow shells out to (coreutils, diffutils, openssh); escrow
   implements no crypto.
 - The demo builds a small NixOS system (x86_64-linux) on first run: it
-  needs network and a few minutes. `--claude` needs
+  needs network and a few minutes. `--claude` needs Landlock ABI ≥ 10 and
   `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) or `ANTHROPIC_API_KEY`.
 
 ## Tests
