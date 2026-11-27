@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>escrow</title>
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<div id="toasts" aria-live="polite"></div>
+
+<main id="login" hidden>
+  <form id="login-form" class="login">
+    <p class="kicker">escrow</p>
+    <h1>Agents propose.<br>Humans sign.</h1>
+    <label>User <input name="user" autocomplete="username" autocapitalize="none" required></label>
+    <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+    <button class="primary">Log in</button>
+    <p class="fine">Every action runs the real escrow binary on this server; agents run in a throwaway Linux jail.</p>
+  </form>
+</main>
+
+<div id="app" hidden>
+  <header class="top">
+    <span class="brand">escrow</span>
+    <span class="who">logged in as <b id="user"></b> · <button id="logout" class="link">log out</button></span>
+  </header>
+
+  <section class="hero">
+    <h1>An agent changed this system. Who asked, who checked, who approved&nbsp;— and can you prove it?</h1>
+    <p>The agent runs in a jail and its changes come out as a proposal. Three different people request, review and sign it, each with an SSH signature. Apply is atomic, and every step goes into a hash-chained log you can verify offline.</p>
+  </section>
+
+  <section>
+    <h2><span class="num">(00)</span> Act as</h2>
+    <div id="personas" class="personas"></div>
+    <p class="fine">Demo personas: their SSH keys live on this server, so you can click through every role. In production a signer's key never leaves their machine. Buttons outside your role are struck through, but you can still press them, and escrow will refuse.</p>
+  </section>
+
+  <section>
+    <h2><span class="num">(01)</span> Propose <span class="role">requester</span></h2>
+    <div class="tabs">
+      <button data-mode="ticket" class="tab on">Ticket OPS-142</button>
+      <button data-mode="claude" class="tab">Claude Code</button>
+      <button data-mode="command" class="tab">Any command</button>
+    </div>
+    <div data-pane="ticket" class="pane"><p>A scripted ops agent works the ticket on a small NixOS config:</p><pre id="ticket" class="quote"></pre></div>
+    <div data-pane="claude" class="pane" hidden><p>Claude Code runs inside the jail with network access (TCP 443 only), one credential, and nothing else.</p><textarea id="prompt" rows="5" maxlength="4096"></textarea><p id="no-claude" class="fine" hidden>No Claude credential on this server.</p></div>
+    <div data-pane="command" class="pane" hidden><p>Any bash command, run as the agent in the jail. Try to break out: <code>cat /etc/shadow</code>, <code>ls /home</code>, <code>curl example.com</code>, <code>rm -rf /work/keys</code>.</p><textarea id="command" rows="3" maxlength="4096" spellcheck="false">sed -i 's/extraGroups = \[ \]/extraGroups = [ "wheel" ]/' configuration.nix; echo pwned > keys/api.key; ls /home /root 2>&1</textarea></div>
+    <button id="run" class="primary act" data-need="requester">Run in the jail</button>
+    <pre id="run-out" class="out" hidden></pre>
+  </section>
+
+  <section>
+    <h2><span class="num">(02)</span> Review &amp; sign <span class="role">reviewer · signer</span></h2>
+    <table id="proposals"><thead><tr><th>id</th><th>status</th><th>requester</th><th>command</th><th>time</th></tr></thead><tbody></tbody></table>
+    <p id="no-proposals" class="fine">No proposals yet: run something in (01).</p>
+    <div id="detail" hidden>
+      <div class="actions">
+        <button id="view" class="act">View diff</button>
+        <button id="review" class="act" data-need="reviewer">Review</button>
+        <label class="check"><input id="closures" type="checkbox"> + closure diff</label>
+        <button id="sign" class="act" data-need="signer">Sign</button>
+        <button id="apply" class="act primary" data-need="signer">Apply</button>
+        <button id="agent-log" class="act">Agent output</button>
+      </div>
+      <div id="diff" class="diff"></div>
+      <pre id="detail-out" class="out" hidden></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">(03)</span> Workspace</h2>
+    <p class="fine">The real files. They change only after a signed apply.</p>
+    <div id="files" class="files"></div>
+  </section>
+
+  <section>
+    <h2><span class="num">(04)</span> Verify <span class="role">anyone, offline</span></h2>
+    <div class="actions">
+      <button id="verify" class="act primary">Verify log</button>
+      <button id="tamper" class="act">Tamper with history, then verify</button>
+    </div>
+    <pre id="verify-out" class="out" hidden></pre>
+    <pre id="log" class="log"></pre>
+  </section>
+
+  <footer>
+    <button id="reset" class="link">Reset the demo world</button>
+    <span class="fine">new keys, fresh workspace, empty log</span>
+  </footer>
+</div>
+</body>
+</html>
