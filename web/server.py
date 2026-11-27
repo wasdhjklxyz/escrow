@@ -47,8 +47,10 @@ import ipaddress
 import http.server
 import json
 import os
+import collections
 import re
 import secrets
+import shlex
 import selectors
 import shutil
 import signal
@@ -114,6 +116,7 @@ LOGIN_FAILS = 5
 RUN_TIMEOUT = 120
 AGENT_TIMEOUT = 600
 REVIEW_TIMEOUT = 900  # a cold NixOS closure build
+MAX_EVENTS = 500  # system event log entries kept (memory and events.jsonl)
 LOCK_WAIT = 5  # how long a state read waits for a running action
 # The users file has no params field: changing these locks everyone out.
 SCRYPT = dict(n=2**14, r=8, p=1)
@@ -243,6 +246,68 @@ class World:
         self.lock = threading.Lock()
         self.busy = ""
         self.fps = {}
+        # The system event log: every escrow command this server ran, by
+        # whom, exactly. Kept across resets; events.jsonl survives restarts.
+        self.actor = ("-", "-", "-")  # (web user, persona, route), set under lock
+        self.events_file = data / "events.jsonl"
+        self.events_lock = threading.Lock()
+        self.events = collections.deque(maxlen=MAX_EVENTS)
+        if self.events_file.exists():
+            for line in self.events_file.read_text().splitlines()[-MAX_EVENTS:]:
+                try:
+                    self.events.append(json.loads(line))
+                except ValueError:
+                    pass
+
+    def record(self, action, cmd="", code=None, ms=0, result="", user=None, persona=None):
+        e = {"t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+             "user": user or self.actor[0], "persona": persona or self.actor[1],
+             "action": action, "cmd": cmd, "code": code, "ms": ms, "result": result}
+        with self.events_lock:
+            self.events.append(e)
+            with open(self.events_file, "a") as f:
+                f.write(json.dumps(e) + "\n")
+
+    def pretty(self, args):
+        """escrow's argv as a shell line, store and world paths named."""
+        names = {ROLE_DEMO: "$ROLE_DEMO", ROLE_CLAUDE: "$ROLE_CLAUDE", ROLE_TEST: "$ROLE_TEST"}
+        root = str(self.root)
+        out = []
+        for a in args:
+            a = names.get(a, a)
+            out.append("$WORLD" + a[len(root):] if a.startswith(root) else a)
+        # Quote like a shell would, but leave the $NAME placeholders readable.
+        return "escrow " + " ".join(a if re.fullmatch(r"[\w@%+=:,./$-]+", a) else shlex.quote(a) for a in out)
+
+    def shell(self, text):
+        """The terminal: text in a fresh jail under role-test, no --key, so
+        nothing is proposed; escrow's stdout is what it would change."""
+        r = self.escrow(["--role", ROLE_TEST, "--workspace", str(self.workspace), "--", "bash", "-c", text])
+        m = RUNDIR_RE.fullmatch((r["stderr"].splitlines() or [""])[0])
+        r["output"] = (read_capped(self.state / "runs" / m.group(1) / "log", MAX_OUT) or "") if m else ""
+        return r
+
+    def system(self):
+        """The demo host as tables, read from the Nix files as text (not
+        evaluated: the agent may have written them). Demo-config specific."""
+        conf = read_capped(self.workspace / "configuration.nix", MAX_FILE) or ""
+        svc = read_capped(self.workspace / "ops-svc.nix", MAX_FILE) or ""
+        key = (read_capped(self.workspace / "keys" / "api.key", 256) or "").strip()
+        users = []
+        for name, body in re.findall(r"users\.users\.([\w-]+)\s*=\s*\{(.*?)\};", conf, re.S):
+            g = re.search(r"extraGroups\s*=\s*\[([^\]]*)\]", body)
+            users.append({"name": name, "groups": re.findall(r'"([^"]+)"', g.group(1)) if g else []})
+        host = re.search(r'networking\.hostName\s*=\s*"([^"]*)"', conf)
+        pk = re.search(r"environment\.systemPackages\s*=\s*\[([^\]]*)\]", conf)
+        return {
+            "host": host.group(1) if host else "",
+            "groups": re.findall(r"users\.groups\.([\w-]+)", conf),
+            "users": users,
+            "packages": re.findall(r"pkgs\.([\w.-]+)", pk.group(1)) if pk else [],
+            "services": [{"name": n, "description": d} for n, d in
+                         re.findall(r'systemd\.services\.([\w-]+)\s*=\s*\{.*?description\s*=\s*"([^"]*)"', svc, re.S)],
+            "key": key[:20] + ("…" if len(key) > 20 else ""),
+        }
 
     def fingerprints(self):
         """SHA256 fingerprint of each persona's key, as ssh-keygen -l shows it."""
@@ -296,7 +361,7 @@ class World:
         new.rename(self.root)
         self.fps = {}
 
-    def escrow(self, args, timeout=RUN_TIMEOUT, state=None, cred=None, extra_env=None):
+    def escrow(self, args, timeout=RUN_TIMEOUT, state=None, cred=None, extra_env=None, quiet=False):
         """Run escrow; {ok, code, stdout, stderr, truncated}.
 
         code is escrow's exit status, negative if killed by a signal (-9
@@ -311,6 +376,7 @@ class World:
         if cred:
             env[cred] = os.environ[cred]
         env.update(extra_env or {})
+        t0 = time.monotonic()
         # Own process group: the jail's init is in it, so a timeout kills all.
         p = subprocess.Popen(
             # escrow sets no rlimits or cgroups; cap each file the agent (and
@@ -324,6 +390,7 @@ class World:
             start_new_session=True,
         )
         out, err = drain(p, timeout)
+        ms = int((time.monotonic() - t0) * 1000)
         if p.returncode == -signal.SIGXFSZ:
             err += f"\nescrow-web: a file hit the {MAX_WRITE >> 20} MiB write cap; nothing was proposed\n".encode()
         for e in os.scandir(self.tmp):
@@ -331,7 +398,12 @@ class World:
         stdout, t1 = capped(out)
         stderr, t2 = capped(err)
         truncated = t1 or t2
-        return {"ok": p.returncode == 0 and not truncated, "code": p.returncode,
+        if not quiet:
+            said = [l for l in stderr.splitlines()
+                    if l.startswith("escrow") and not re.match(r"escrow: (run dir|agent output):", l)]
+            said = said or stdout.splitlines()[:1] or [""]
+            self.record(self.actor[2], self.pretty(args), p.returncode, ms, said[-1])
+        return {"ok": p.returncode == 0 and not truncated, "code": p.returncode, "ms": ms,
                 "stdout": stdout, "stderr": stderr, "truncated": truncated}
 
     def run(self, args, timeout=RUN_TIMEOUT, cred=None):
@@ -354,6 +426,17 @@ class World:
         env_dir = next(l[4:] for l in policy if l.startswith("env "))
         nstore = sum(l.startswith("store ") for l in policy)
         pwned = f"escrow-web-pwned-{os.getpid()}"
+
+        def snapshot():  # the real workspace: path, type, mode, size, mtime, link
+            out = []
+            for d, dirs, files in os.walk(self.workspace):
+                for n in dirs + files:
+                    st = os.lstat(os.path.join(d, n))
+                    link = os.readlink(os.path.join(d, n)) if stat.S_ISLNK(st.st_mode) else ""
+                    out.append((os.path.relpath(os.path.join(d, n), self.workspace), st.st_mode, st.st_size, st.st_mtime_ns, link))
+            return sorted(out)
+
+        before = snapshot()
         r = self.escrow(
             ["--role", ROLE_TEST, "--workspace", str(self.workspace), "--", "bash", "-c", TOUR, "tour",
              f"{env_dir}/share/escrow-tests/escape", str(Path.home()), pwned, str(os.getpid()), str(nstore)],
@@ -361,9 +444,12 @@ class World:
         )
         m = RUNDIR_RE.fullmatch((r["stderr"].splitlines() or [""])[0])
         text = (read_capped(self.state / "runs" / m.group(1) / "log", MAX_OUT) or "") if m else ""
-        text += "== Checked from outside, by this server|the host after the run\n"
-        for p in (Path.home() / pwned, Path("/tmp") / pwned):
-            text += f"{'ESCAPED' if os.path.lexists(p) else 'BLOCKED'} write {p}: {'exists' if os.path.lexists(p) else 'not there'}\n"
+        if m and r["code"] not in (125, 127):  # the jail ran: check the host from outside
+            text += "== Checked from outside, by this server|the host after the run\n"
+            for p in (Path.home() / pwned, Path("/tmp") / pwned):
+                text += f"{'ESCAPED' if os.path.lexists(p) else 'BLOCKED'} write {p}: {'exists' if os.path.lexists(p) else 'not there'}\n"
+            same = snapshot() == before
+            text += f"{'BLOCKED' if same else 'ESCAPED'} change the real workspace: {'unchanged, writes stayed in the overlay' if same else 'it changed'}\n"
         r["tour"] = text
         r["ok"] = r["code"] == 0 and not re.search(r"^(ESCAPED|ERROR)", text, re.M)
         return r
@@ -405,7 +491,7 @@ class World:
         """
         if not (self.state / "log").exists():  # nothing proposed yet
             return [], ""
-        r = self.escrow(["list"])
+        r = self.escrow(["list"], quiet=True)
         if not r["ok"]:
             return [], r["stderr"]
         rows = []
@@ -591,6 +677,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "proposals": proposals,
             "error": error,
             "files": w.files(),
+            "system": w.system(),
+            "events": list(reversed(w.events))[:200],
+            "terminal": bool(ROLE_TEST),
             "log": tail_lines(w.state / "log", MAX_LOG),
         }
 
@@ -613,6 +702,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         w = self.app.world
         persona, rid = req.get("persona"), req.get("id")
+        self.persona = persona if isinstance(persona, str) else None
         if persona is not None and not (isinstance(persona, str) and persona in PERSONAS):
             return self.send(400, {"error": "unknown persona"})
         if rid is not None and not (isinstance(rid, str) and ID_RE.fullmatch(rid)):
@@ -621,7 +711,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         log(f"{self.client_ip()} {self.user} as {persona or '-'}: {path} {rid or ''}")
 
         if path == "/api/reset":
-            return self.send_locked(lambda: (w.reset(), {"ok": True, "stderr": "escrow-web: demo reset: new keys, fresh workspace, empty audit log\n"})[1])
+            def reset():
+                w.reset()
+                w.record("reset", result="new keys, fresh workspace, empty audit log", code=0)
+                return {"ok": True, "stderr": "escrow-web: demo reset: new keys, fresh workspace, empty audit log\n"}
+            return self.send_locked(reset)
         if path == "/api/verify":
             if req.get("tamper") is True:
                 return self.send_locked(w.verify_tampered)
@@ -649,6 +743,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(400, {"error": "bad request"})
         tok, code = self.app.login(self.client_ip(), user, pw)
         log(f"{self.client_ip()} {user} login {'ok' if tok else 'failed'}")
+        self.app.world.record("login", result="ok" if tok else "refused: wrong password or rate limit",
+                              code=0 if tok else 1, user=user, persona="-")
         if not tok:
             return self.send(code, {"error": "too many attempts" if code == 429 else "wrong user or password"})
         ck = f"sid={tok}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={SESSION_TTL}"
@@ -659,6 +755,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         mode, text = req.get("mode"), req.get("text", "")
         if mode == "tour" and ROLE_TEST:
             return self.send_locked(w.tour)
+        if mode == "shell" and ROLE_TEST:
+            if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
+                return self.send(400, {"error": "bad request"})
+            return self.send_locked(lambda: w.shell(text))
         if key is None or not isinstance(text, str) or len(text) > MAX_TEXT:
             return self.send(400, {"error": "bad request"})
         base = ["--key", key, "--workspace", str(w.workspace)]
@@ -692,6 +792,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(409, {"error": f"busy: {w.busy}"})
         try:
             w.busy = f"{self.user}: {urllib.parse.urlsplit(self.path).path}"
+            w.actor = (self.user, getattr(self, "persona", None) or "-", urllib.parse.urlsplit(self.path).path.removeprefix("/api/"))
             if not w.root.exists():
                 w.reset()
             res = fn()

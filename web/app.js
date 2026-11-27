@@ -17,7 +17,10 @@ const STEPS = [
   ["sign", "Signed", "signer"],
   ["apply", "Applied", "signer"],
 ];
-const MODES = { ticket: "Ticket OPS-142", claude: "Claude Code", command: "a command", tour: "Escape tour" };
+const MODES = { ticket: "Ticket OPS-142", claude: "Claude Code", command: "a command" };
+const TRY = ["ls /", "id", "cat /etc/shadow", "ls /proc", "head -5 configuration.nix", "echo hi > new.txt", "touch /nix/store/x", "cat < /dev/tcp/1.1.1.1/443"];
+const termHistory = [];
+let termPos = 0;
 let state = null; // last /api/state
 let persona = "alice";
 let mode = "ticket";
@@ -131,6 +134,72 @@ function logEvents() {
 }
 
 // ---- rendering
+
+function cell(tag, cls, text, title) {
+  const e = el(tag, cls, text);
+  if (title) e.title = title;
+  return e;
+}
+
+// The managed server as tables, parsed by the server from the Nix files.
+function renderSystem() {
+  const s = state.system;
+  const box = $("#system");
+  box.replaceChildren();
+  const card = (title, ...kids) => {
+    const c = el("div", "card");
+    c.append(el("h4", "", title), ...kids);
+    box.append(c);
+  };
+  const host = el("p", "big", s.host || "?");
+  card("Host", host, el("p", "fine", "NixOS · container profile"));
+  const users = el("table", "mini");
+  for (const u of s.users) {
+    const tr = el("tr");
+    const g = el("td");
+    for (const x of u.groups) g.append(el("span", "pill", x));
+    if (!u.groups.length) g.append(el("span", "fine", "no groups"));
+    tr.append(el("td", "mono", u.name), g);
+    users.append(tr);
+  }
+  card("Users and groups", users);
+  const pk = el("div");
+  for (const p of s.packages) pk.append(el("span", "pill", p));
+  if (!s.packages.length) pk.append(el("span", "fine", "none beyond the base system"));
+  card("Extra packages", pk);
+  const sv = el("div");
+  for (const x of s.services) sv.append(el("p", "", ""), el("span", "mono", x.name + " "), el("span", "fine", x.description));
+  card("Services", sv);
+  card("Secrets", el("p", "mono", "/etc/ops-svc/api.key"), el("p", "fine", s.key ? `${s.key}  (mode 0440, group ops)` : "missing"));
+}
+
+function renderEvents() {
+  const tb = $("#events tbody");
+  const f = $("#ev-filter").value.toLowerCase();
+  tb.replaceChildren();
+  for (const e of state.events) {
+    const row = [e.t, e.user, e.persona, e.action, e.cmd, e.code ?? "", e.ms || "", e.result];
+    if (f && !row.join(" ").toLowerCase().includes(f)) continue;
+    const tr = el("tr", e.code ? "fail" : "");
+    tr.append(
+      el("td", "fine", e.t.replace("T", " ").replace("Z", "")),
+      el("td", "", e.user),
+      el("td", "", e.persona),
+      el("td", "", e.action),
+      cell("td", "mono cmdline", e.cmd, e.cmd),
+      el("td", "mono", String(e.code ?? "")),
+      el("td", "mono fine", e.ms ? String(e.ms) : ""),
+      cell("td", "result", e.result, e.result),
+    );
+    tb.append(tr);
+  }
+}
+
+function termPrint(text, cls) {
+  const out = $("#term-out");
+  out.append(el("div", cls || "", text));
+  out.scrollTop = out.scrollHeight;
+}
 
 // web/tour.sh's output: "== layer|meaning" sections, then lib.sh's
 // "BLOCKED|ESCAPED|ERROR attempt: error" lines and "LIMIT text" lines.
@@ -366,6 +435,8 @@ async function refresh() {
   $("#ticket").textContent = state.ticket;
   if (!$("#prompt").value) $("#prompt").value = state.ticket;
   $("#no-claude").hidden = state.claude;
+  for (const x of $$("[data-jtab]")) x.hidden = !state.terminal;
+  if (!state.terminal) for (const p of $$(".jpane")) p.hidden = true;
   if (state.error) toast("escrow list failed: " + state.error, "bad");
   if (selected && !state.proposals.some((p) => p.id === selected)) selected = null;
   if (pendingVerify !== null) verifiedLog = logEvents().length === pendingVerify ? state.log : null;
@@ -374,6 +445,8 @@ async function refresh() {
   renderPersonas();
   renderProposals();
   renderFiles();
+  renderSystem();
+  renderEvents();
   renderLog();
 }
 
@@ -409,12 +482,11 @@ $("#clear-activity").onclick = () => {
   $("#activity").replaceChildren();
   $("#no-activity").hidden = false;
 };
-for (const t of $$(".tab"))
+for (const t of $$(".tab[data-mode]"))
   t.onclick = () => {
     mode = t.dataset.mode;
-    for (const x of $$(".tab")) x.classList.toggle("on", x === t);
+    for (const x of $$(".tab[data-mode]")) x.classList.toggle("on", x === t);
     for (const p of $$(".pane")) p.hidden = p.dataset.pane !== mode;
-    $("#run").hidden = mode === "tour";
   };
 $("#run").onclick = () =>
   act($("#run"), async () => {
@@ -432,16 +504,54 @@ $("#run").onclick = () =>
     }
   });
 $("#view").onclick = () => act($("#view"), showDiff);
+for (const t of $$(".jtab"))
+  t.onclick = () => {
+    for (const x of $$(".jtab")) x.classList.toggle("on", x === t);
+    for (const p of $$(".jpane")) p.hidden = p.dataset.jpane !== t.dataset.jtab;
+  };
+$("#ev-filter").oninput = () => state && renderEvents();
+for (const c of TRY) {
+  const b = el("button", "chip", c);
+  b.onclick = () => {
+    $("#term-in").value = c;
+    $("#term-in").focus();
+  };
+  $(".chips").append(b);
+}
+termPrint("Each command runs in a fresh jail: the role's tools only, no network, writes go to a throwaway overlay. Nothing is proposed.", "term-dim");
+$("#term-in").onkeydown = (ev) => {
+  if (ev.key !== "ArrowUp" && ev.key !== "ArrowDown") return;
+  ev.preventDefault();
+  termPos = Math.max(0, Math.min(termHistory.length, termPos + (ev.key === "ArrowUp" ? -1 : 1)));
+  $("#term-in").value = termHistory[termPos] || "";
+};
+$("#term-form").onsubmit = (ev) => {
+  ev.preventDefault();
+  const cmd = $("#term-in").value.trim();
+  if (!cmd || inflight) return;
+  termHistory.push(cmd);
+  termPos = termHistory.length;
+  $("#term-in").value = "";
+  termPrint("agent@jail:/work$ " + cmd, "term-cmd");
+  act($("#term-form button") || $("#term-in"), async () => {
+    const r = await api("POST", "/api/run", { mode: "shell", text: cmd });
+    if (r.output) termPrint(r.output.replace(/\n$/, ""));
+    const changes = (r.stdout || "").split("\n").filter((l) => /^[MAD] \S/.test(l));
+    if (changes.length) termPrint("would change (thrown away, not proposed): " + changes.join(", "), "term-change");
+    termPrint(`[fresh jail · exit ${r.code} · ${r.ms} ms]`, r.code ? "term-bad" : "term-dim");
+  }, "terminal");
+};
 $("#tour-run").onclick = () =>
   act($("#tour-run"), async () => {
     const res = await api("POST", "/api/run", { mode: "tour" });
     const t = res.tour || "";
     renderTour(t);
-    const blocked = (t.match(/^BLOCKED/gm) || []).length;
-    const through = (t.match(/^(ESCAPED|ERROR)/gm) || []).length;
-    res.stderr = `escrow-web: ${blocked} attempts blocked, ${through} got through\n` + (res.ok ? "" : res.stderr);
-    if (!res.ok) $("#run-details").hidden = false;
-    report("Escape tour", res, res.ok ? null : $("#run-out"));
+    const n = (re) => (t.match(re) || []).length;
+    const [blocked, through, untested] = [n(/^BLOCKED/gm), n(/^ESCAPED/gm), n(/^ERROR/gm)];
+    const msg = `${blocked} attempts blocked, ${through} got through` + (untested ? `, ${untested} not tested` : "");
+    // The counts are the verdict; escrow's own lines go in the box below on failure.
+    report("Escape tour", { ...res, stderr: "escrow-web: " + msg + "\n" });
+    if (!res.ok || !t) $("#tour").prepend(el("pre", "out bad", (res.stderr || "") + (t ? "" : "the jail did not start")));
   });
 $("#review").onclick = () =>
   act($("#review"), async () => {

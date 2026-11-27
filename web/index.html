@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>escrow</title>
+<title>escrow · live demo</title>
 <link rel="stylesheet" href="/style.css">
 <script src="/app.js" defer></script>
 </head>
@@ -12,25 +12,25 @@
 
 <main id="login" hidden>
   <form id="login-form" class="login">
-    <p class="kicker">escrow</p>
+    <p class="kicker">escrow · live demo</p>
     <h1>Agents propose.<br>Humans sign.</h1>
     <label>User <input name="user" autocomplete="username" autocapitalize="none" required></label>
     <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
     <button class="primary">Log in</button>
-    <p class="fine">Every action runs the real escrow binary on this server; agents run in a throwaway Linux jail.</p>
+    <p class="fine">A real escrow install on this server. Every button runs it.</p>
   </form>
 </main>
 
 <div id="app" hidden>
   <header class="top">
     <span class="brand">escrow</span>
-    <span class="tagline">Propose · Review · Sign · Apply · Verify</span>
+    <span class="live">● live demo</span>
     <span class="who">logged in as <b id="user"></b> · <button id="logout" class="link">Log out</button></span>
   </header>
 
   <section class="hero">
-    <h1>An agent changed this system. Who asked, who checked, who approved, and can you prove it?</h1>
-    <p>The agent runs in a jail. Its changes come out as a proposal that three different people request, review and sign, each with an SSH key. Apply is atomic, and every step goes into a hash-chained log anyone can verify offline.</p>
+    <h1>Agents propose. Humans sign.</h1>
+    <p>An AI agent changes a production server's config inside a locked-down Linux jail. Nothing reaches the server until three different people request, review and sign the change, each with their own SSH key. Every step lands in a tamper-evident audit log.</p>
   </section>
 
   <div class="layout">
@@ -38,49 +38,46 @@
       <div class="panel">
         <h3>Acting as</h3>
         <div id="personas" class="personas"></div>
-        <p class="fine">Demo personas: their keys live on this server so you can play every role. In production each key stays with its person. Struck-through buttons are ones this persona may not use (wrong role, or its own proposal). Press one anyway: escrow itself refuses.</p>
+        <p class="fine">Demo staff. Their keys live on this server so you can play every role; in production each key stays with its person. Struck-through buttons aren't allowed for this person. Press one anyway: escrow refuses.</p>
       </div>
       <div class="panel">
         <h3>Activity <button id="clear-activity" class="link">Clear</button></h3>
         <ol id="activity" class="activity"></ol>
-        <p id="no-activity" class="fine">Nothing yet. Every allowed and refused action shows up here.</p>
+        <p id="no-activity" class="fine">Your actions and escrow's answers show up here.</p>
       </div>
     </aside>
 
     <div class="content">
       <section>
-        <h2><span class="num">(01)</span> Propose <span class="role">requester</span></h2>
+        <h2><span class="num">01</span> Propose a change <span class="role">requester</span></h2>
         <div class="tabs">
           <button data-mode="ticket" class="tab on">Ticket OPS-142</button>
           <button data-mode="claude" class="tab">Claude Code</button>
-          <button data-mode="command" class="tab">Any command</button>
-          <button data-mode="tour" class="tab">Escape tour</button>
+          <button data-mode="command" class="tab">Your own command</button>
         </div>
-        <div data-pane="ticket" class="pane"><p>A scripted ops agent works this ticket on a small NixOS config:</p><pre id="ticket" class="quote"></pre></div>
-        <div data-pane="claude" class="pane" hidden><p>Claude Code runs in the jail with network (TCP 443 only), one credential, and nothing else.</p><textarea id="prompt" rows="5" maxlength="4096"></textarea><p id="no-claude" class="fine" hidden>No Claude credential on this server.</p></div>
-        <div data-pane="command" class="pane" hidden><p>Any bash command, run as the agent inside the jail. Try to break out: <code>cat /etc/shadow</code>, <code>ls /home</code>, <code>curl example.com</code>, <code>rm -rf /work/keys</code>.</p><textarea id="command" rows="3" maxlength="4096" spellcheck="false">sed -i 's/extraGroups = \[ \]/extraGroups = [ "wheel" ]/' configuration.nix; echo attacker-key > keys/api.key; ls /home /root 2>&1</textarea></div>
-        <div data-pane="tour" class="pane" hidden><p>escrow's own escape tests, run inside the jail as a hostile agent: read host secrets, write outside, reach host processes, run a smuggled binary, open a connection, mount. Each row is one attempt and the error the kernel gave back, grouped by the layer that stops it. Then the limits. Nothing is proposed.</p><button id="tour-run" class="primary act">Run the escape tour</button><div id="tour" class="tour"></div></div>
-        <button id="run" class="primary act" data-need="requester">Run in the jail</button>
+        <div data-pane="ticket" class="pane"><pre id="ticket" class="quote"></pre></div>
+        <div data-pane="claude" class="pane" hidden><p class="fine">Claude Code works the ticket in the jail: network on port 443 only, one credential, nothing else.</p><textarea id="prompt" rows="4" maxlength="4096"></textarea><p id="no-claude" class="fine" hidden>Not available: no Claude credential on this server.</p></div>
+        <div data-pane="command" class="pane" hidden><p class="fine">Any bash command, run as the agent. Its file changes become a proposal.</p><textarea id="command" rows="2" maxlength="4096" spellcheck="false">sed -i 's/extraGroups = \[ \]/extraGroups = [ "wheel" ]/' configuration.nix; echo attacker-key > keys/api.key</textarea></div>
+        <button id="run" class="primary act" data-need="requester">Run the agent</button>
         <details id="run-details" hidden><summary id="run-summary"></summary><pre id="run-out" class="out"></pre></details>
       </section>
 
       <section>
-        <h2><span class="num">(02)</span> Review, sign, apply <span class="role">reviewer · signer</span></h2>
+        <h2><span class="num">02</span> Review, sign, apply <span class="role">reviewer · signer</span></h2>
         <table id="proposals"><thead><tr><th>id</th><th>status</th><th>requester</th><th>command</th><th>time (UTC)</th></tr></thead><tbody></tbody></table>
-        <p id="no-proposals" class="fine">No proposals yet: run something in (01).</p>
+        <p id="no-proposals" class="fine">No proposals yet. Run the agent above.</p>
         <div id="detail" hidden>
           <ol id="chain" class="chain"></ol>
           <p id="chain-note" class="fine"></p>
           <div class="actions">
             <button id="view" class="act">View diff</button>
-            <label class="check"><input id="closures" type="checkbox"> + package changes (closure diff)</label>
+            <label class="check"><input id="closures" type="checkbox"> + package changes</label>
             <span class="spacer"></span>
             <button id="review" class="act" data-need="reviewer">Review</button>
             <button id="sign" class="act" data-need="signer">Sign</button>
             <button id="apply" class="act primary" data-need="signer">Apply</button>
             <button id="agent-log" class="act link">Agent output</button>
           </div>
-          <p class="fine">View diff only reads. Review and Sign each add an SSH signature to the audit log; Apply changes the real workspace.</p>
           <p id="diff-stat" class="diff-stat" hidden></p>
           <div id="diff" class="diff"></div>
           <pre id="detail-out" class="out" hidden></pre>
@@ -88,13 +85,14 @@
       </section>
 
       <section>
-        <h2><span class="num">(03)</span> Workspace</h2>
-        <p class="fine">The real files. They change only after a signed apply.</p>
-        <div id="files" class="files"></div>
+        <h2><span class="num">03</span> The server <span class="role">live configuration</span></h2>
+        <p class="fine">What the managed server looks like right now. It only changes after a signed apply.</p>
+        <div id="system" class="system"></div>
+        <details class="source"><summary>Source files (NixOS configuration)</summary><div id="files" class="files"></div></details>
       </section>
 
       <section>
-        <h2><span class="num">(04)</span> Audit log <span class="role">anyone · offline</span></h2>
+        <h2><span class="num">04</span> Audit log <span class="role">verifiable offline</span></h2>
         <div class="actions">
           <button id="verify" class="act primary">Verify log</button>
           <button id="tamper" class="act">Tamper with history, then verify</button>
@@ -102,14 +100,40 @@
         </div>
         <pre id="verify-out" class="out" hidden></pre>
         <div class="scroll"><table id="log"><thead><tr><th>#</th><th>time (UTC)</th><th>event</th><th>proposal</th><th>by</th><th>signature</th><th>prev hash</th></tr></thead><tbody></tbody></table></div>
-        <p id="no-log" class="fine">Empty: nothing has happened yet.</p>
+        <p id="no-log" class="fine">Empty: nothing has been proposed yet.</p>
+      </section>
+
+      <section>
+        <h2><span class="num">05</span> Inside the jail</h2>
+        <div class="tabs">
+          <button data-jtab="terminal" class="jtab tab on">Terminal</button>
+          <button data-jtab="tour" class="jtab tab">Escape tour</button>
+        </div>
+        <div data-jpane="terminal" class="jpane">
+          <div class="term" id="term">
+            <div id="term-out" class="term-out"></div>
+            <form id="term-form" class="term-line"><span class="prompt">agent@jail:/work$</span><input id="term-in" autocomplete="off" spellcheck="false" maxlength="4096" aria-label="command"></form>
+          </div>
+          <div class="chips"><span class="fine">Try:</span></div>
+        </div>
+        <div data-jpane="tour" class="jpane" hidden>
+          <p class="fine">escrow's own escape tests, run as a hostile agent. Each row is one attempt and the kernel's answer, grouped by the layer that stops it.</p>
+          <button id="tour-run" class="primary act">Run the escape tour</button>
+          <div id="tour" class="tour"></div>
+        </div>
+      </section>
+
+      <section>
+        <h2><span class="num">06</span> System events <span class="role">every command this server ran</span></h2>
+        <div class="actions"><input id="ev-filter" placeholder="Filter: user, persona, action, command…" aria-label="filter events"></div>
+        <div class="scroll"><table id="events"><thead><tr><th>time (UTC)</th><th>user</th><th>as</th><th>action</th><th>command</th><th>exit</th><th>ms</th><th>result</th></tr></thead><tbody></tbody></table></div>
       </section>
     </div>
   </div>
 
   <footer>
-    <button id="reset" class="link">Reset the demo world</button>
-    <span class="fine">new keys, fresh workspace, empty audit log</span>
+    <button id="reset" class="link">Reset the demo</button>
+    <span class="fine">new keys, fresh server config, empty audit log (system events are kept)</span>
   </footer>
 </div>
 </body>
