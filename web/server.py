@@ -221,6 +221,17 @@ class World:
         self.root = data / "world"
         self.lock = threading.Lock()
         self.busy = ""
+        self.fps = {}
+
+    def fingerprints(self):
+        """SHA256 fingerprint of each persona's key, as ssh-keygen -l shows it."""
+        if not self.fps:
+            for p in PERSONAS:
+                r = subprocess.run(["ssh-keygen", "-l", "-f", str(self.keys / f"{p}.pub")],
+                                   capture_output=True, text=True)
+                f = r.stdout.split()
+                self.fps[p] = f[1] if r.returncode == 0 and len(f) > 1 else "?"
+        return self.fps
 
     @property
     def keys(self):
@@ -262,6 +273,7 @@ class World:
         (new / "tmp").mkdir(mode=0o700)
         rmtree(self.root)
         new.rename(self.root)
+        self.fps = {}
 
     def escrow(self, args, timeout=RUN_TIMEOUT, state=None, cred=None):
         """Run escrow; {ok, code, stdout, stderr, truncated}.
@@ -522,7 +534,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         proposals, error = w.proposals()
         return {
             "user": self.user,
-            "personas": PERSONAS,
+            "personas": {p: {"roles": r, "key": w.fingerprints()[p]} for p, r in PERSONAS.items()},
             "claude": CRED is not None,
             "ticket": TICKET,
             "proposals": proposals,
