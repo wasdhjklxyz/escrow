@@ -59,7 +59,7 @@ static bool capture(char *const argv[], char *out, size_t n, FILE *errs) {
   fclose(o);
   if (!ok && !errs) {
     rewind(e);
-    print_escaped(e);
+    print_escaped(e, "  | ");
   }
   if (!errs)
     fclose(e);
@@ -192,7 +192,7 @@ static void print_diff(FILE *in) {
   }
   free(line);
   rewind(out);
-  print_escaped(out);
+  print_escaped(out, "");
   fclose(out);
 }
 
