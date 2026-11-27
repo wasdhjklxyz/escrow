@@ -297,7 +297,7 @@ static void show_content(int root, const struct change *c) {
   if (st > 1)
     errx(1, "diff failed");
   rewind(out);
-  print_escaped(out);
+  print_escaped(out, "");
   fclose(out);
   fclose(next);
   if (base)
