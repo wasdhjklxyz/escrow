@@ -39,9 +39,18 @@ for TLS (`/etc/caddy/Caddyfile`):
 
 ```caddyfile
 escrow.example.com {
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
 	reverse_proxy 127.0.0.1:8080
 }
 ```
+
+Only Caddy is exposed: escrow-web listens on loopback, and the session
+cookie is `Secure`, so it never travels over plain HTTP.
+
+Accounts: `escrow-web passwd --data DIR <user> --generate` prints a random
+24-character password once. Passwords are stored as scrypt hashes
+(N=2^17, r=8, p=1, per-user salt) in a 0600 file; logins are limited to 5
+failures per address and 20 per user name per 10 minutes.
 
 systemd unit (`/etc/systemd/system/escrow-web.service`):
 

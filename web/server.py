@@ -118,20 +118,28 @@ AGENT_TIMEOUT = 600
 REVIEW_TIMEOUT = 900  # a cold NixOS closure build
 MAX_EVENTS = 500  # system event log entries kept (memory and events.jsonl)
 LOCK_WAIT = 5  # how long a state read waits for a running action
-# The users file has no params field: changing these locks everyone out.
-SCRYPT = dict(n=2**14, r=8, p=1)
+# Password hashing: scrypt at OWASP's minimum (N=2^17, r=8, p=1, 128 MiB
+# each). The users file stores log2(N) per user, so raising it later keeps
+# old hashes working. At most two hashes run at once: a login flood waits
+# instead of exhausting memory.
+SCRYPT_LOG2N = 17
+SCRYPT_SLOTS = threading.BoundedSemaphore(2)
+LOGIN_USER_FAILS = 20  # per user name, across all addresses, per window
 
 
 def log(msg):
     print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), msg, file=sys.stderr, flush=True)
 
 
-def scrypt(password, salt):
-    return hashlib.scrypt(password.encode(), salt=salt, **SCRYPT)
+def scrypt(password, salt, log2n=SCRYPT_LOG2N):
+    n = 1 << log2n
+    with SCRYPT_SLOTS:
+        return hashlib.scrypt(password.encode(), salt=salt, n=n, r=8, p=1, maxmem=256 * n * 8)
 
 
 def load_users(data):
-    """users file: one `<name> <salt hex> <scrypt hex>` per line."""
+    """users file: one `<name> <log2 N>:<salt hex> <scrypt hex>` per line
+    (a bare `<salt hex>` is the older N=2^14). Name -> (log2 N, salt, hash)."""
     users = {}
     try:
         lines = (data / "users").read_text().splitlines()
@@ -141,7 +149,8 @@ def load_users(data):
         f = line.split()
         if len(f) != 3:
             sys.exit(f"escrow-web: {data / 'users'}:{n}: expected <name> <salt> <hash>")
-        users[f[0]] = (bytes.fromhex(f[1]), bytes.fromhex(f[2]))
+        log2n, _, salt = f[1].rpartition(":")
+        users[f[0]] = (int(log2n or 14), bytes.fromhex(salt), bytes.fromhex(f[2]))
     return users
 
 
@@ -545,25 +554,30 @@ class App:
         # can't all pass the limit check; a success takes it back.
         if ":" in ip:  # one IPv6 client owns a /64
             ip = str(ipaddress.ip_network(f"{ip}/64", strict=False))
+        # Two buckets: the address (one guesser) and the user name (many
+        # addresses guessing one account).
+        limits = {ip: LOGIN_FAILS, "user:" + user: LOGIN_USER_FAILS}
         with self.lock:
             now = time.time()
             if len(self.fails) > 10000:
                 self.fails = {k: v for k, v in self.fails.items() if v and now - v[-1] < LOGIN_WINDOW}
-            recent = [t for t in self.fails.get(ip, []) if now - t < LOGIN_WINDOW]
-            if len(recent) >= LOGIN_FAILS:
-                self.fails[ip] = recent
-                return None, 429
-            recent.append(now)
-            self.fails[ip] = recent
+            for k, limit in limits.items():
+                recent = [t for t in self.fails.get(k, []) if now - t < LOGIN_WINDOW]
+                self.fails[k] = recent
+                if len(recent) >= limit:
+                    return None, 429
+            for k in limits:
+                self.fails[k].append(now)
         users = load_users(self.data)
         # Unknown users still cost one scrypt: no timing oracle for names.
-        salt, want = users.get(user, (b"\0" * 16, b"\0" * 64))
-        good = hmac.compare_digest(scrypt(password, salt), want) and user in users
+        log2n, salt, want = users.get(user, (SCRYPT_LOG2N, b"\0" * 16, b"\0" * 64))
+        good = hmac.compare_digest(scrypt(password, salt, log2n), want) and user in users
         with self.lock:
             if not good:
                 return None, 401
-            if now in self.fails.get(ip, []):
-                self.fails[ip].remove(now)
+            for k in limits:
+                if now in self.fails.get(k, []):
+                    self.fails[k].remove(now)
             tok = secrets.token_urlsafe(32)
             self.sessions[tok] = (user, time.time() + SESSION_TTL)
             return tok, 200
@@ -593,6 +607,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=(), interest-cohort=()")
         self.send_header(
             "Content-Security-Policy",
             "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
@@ -814,25 +832,31 @@ def main():
     pw = sub.add_parser("passwd")
     pw.add_argument("--data", type=Path, required=True)
     pw.add_argument("user")
+    pw.add_argument("--generate", action="store_true", help="make a random password and print it once")
     a = ap.parse_args()
     a.data.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     if a.cmd == "passwd":
         if not USER_RE.fullmatch(a.user):
             sys.exit(f"escrow-web: bad user name {a.user!r}")
-        p1 = getpass.getpass(f"password for {a.user}: ")
-        if len(p1) < MIN_PASSWORD:
-            sys.exit(f"escrow-web: password shorter than {MIN_PASSWORD} characters")
-        if p1 != getpass.getpass("again: "):
-            sys.exit("escrow-web: passwords differ")
+        if a.generate:
+            p1 = secrets.token_urlsafe(18)  # 144 bits
+        else:
+            p1 = getpass.getpass(f"password for {a.user}: ")
+            if len(p1) < MIN_PASSWORD:
+                sys.exit(f"escrow-web: password shorter than {MIN_PASSWORD} characters")
+            if p1 != getpass.getpass("again: "):
+                sys.exit("escrow-web: passwords differ")
         salt = secrets.token_bytes(16)
         users = {u: v for u, v in load_users(a.data).items() if u != a.user}
-        users[a.user] = (salt, scrypt(p1, salt))
+        users[a.user] = (SCRYPT_LOG2N, salt, scrypt(p1, salt))
         tmp = a.data / "users.tmp"
         with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
-            f.writelines(f"{u} {s.hex()} {d.hex()}\n" for u, (s, d) in users.items())
+            f.writelines(f"{u} {n}:{s.hex()} {d.hex()}\n" for u, (n, s, d) in users.items())
         os.replace(tmp, a.data / "users")
         print(f"escrow-web: set password for {a.user}")
+        if a.generate:
+            print(f"password: {p1}  (shown once; not stored anywhere in clear)")
         return
 
     for name, v in (("ESCROW_WEB_ROLE_DEMO", ROLE_DEMO), ("ESCROW_WEB_WORKSPACE", WORKSPACE)):
