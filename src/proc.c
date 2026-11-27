@@ -153,9 +153,13 @@ void sha256_buf(const void *buf, size_t n, char hex[SHA256_HEX + 1]) {
   sha256_close(&h, hex);
 }
 
-void print_escaped(FILE *in) {
+void print_escaped(FILE *in, const char *prefix) {
   int c;
+  bool bol = true;
   while ((c = getc(in)) != EOF) {
+    if (bol)
+      fputs(prefix, stdout);
+    bol = c == '\n';
     if ((c < 0x20 && c != '\t' && c != '\n') || c >= 0x7f)
       printf("\\%03o", c);
     else

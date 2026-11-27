@@ -22,8 +22,9 @@ int write_all(int fd, const void *buf, size_t n);
 
 // Copies in to stdout so untrusted text can't drive the terminal: control
 // bytes (but \t and \n) and anything >= 0x7f (UTF-8, bidi overrides)
-// become \ooo.
-void print_escaped(FILE *in);
+// become \ooo. prefix starts every line, so text the agent can shape (nix
+// errors from its own Nix code) can't pass for escrow's lines or the diff.
+void print_escaped(FILE *in, const char *prefix);
 
 // rm -rf a tree escrow made (a stage, a materialized proposal). Its dirs
 // may be 0555 (a signed mode), so u+rwx goes back first; chmod -R doesn't
