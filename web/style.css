@@ -147,6 +147,7 @@ tbody tr.on { background: var(--card); box-shadow: inset 3px 0 0 var(--accent); 
 .chain .by { font-family: var(--serif); font-size: 17px; }
 .chain li.next .by { font: italic 13px system-ui, sans-serif; color: var(--accent); }
 .chain .when { font: 11px var(--mono); color: var(--muted); }
+.chain button.link { align-self: flex-start; font-size: 12px; color: var(--accent); }
 @media (max-width: 600px) { .chain { grid-template-columns: 1fr 1fr; } .chain li { border-right-width: 1px; } }
 
 /* verify verdict */

@@ -215,7 +215,23 @@ function renderChain() {
     if (e) {
       li.append(el("span", "by", e.who), el("span", "when", e.time.slice(11, 19) + " · log line " + e.seq));
     } else {
-      li.append(el("span", "by", next ? `waiting for a ${role}` : ""), el("span", "when", ""));
+      li.append(el("span", "by", next ? `waiting for a ${role}` : ""));
+      // A shortcut to someone who may take this step (not the requester for
+      // a review). escrow still decides; this only picks the persona.
+      const prop = state.proposals.find((x) => x.id === selected);
+      const who = next && Object.keys(state.personas).find(
+        (p) => state.personas[p].roles.split(",").includes(role) && !(event === "review" && prop && p === prop.requester),
+      );
+      if (who && who !== persona) {
+        const go = el("button", "link", `→ act as ${who}`);
+        go.onclick = () => {
+          persona = who;
+          renderPersonas();
+          renderChain();
+          markOffRole();
+        };
+        li.append(go);
+      } else li.append(el("span", "when", who ? `you are ${who}` : ""));
       next = false;
     }
     box.append(li);
