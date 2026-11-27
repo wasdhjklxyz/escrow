@@ -49,8 +49,10 @@ cookie is `Secure`, so it never travels over plain HTTP.
 
 Accounts: `escrow-web passwd --data DIR <user> --generate` prints a random
 24-character password once. Passwords are stored as scrypt hashes
-(N=2^17, r=8, p=1, per-user salt) in a 0600 file; logins are limited to 5
-failures per address and 20 per user name per 10 minutes.
+(N=2^17, r=8, p=1, per-user salt) in a 0600 file; an address gets 5 failed
+logins per 10 minutes, and after 20 failures on one user name every
+attempt on it is slowed down (never blocked, so nobody can lock the real
+user out). Only successful logins go into the system event log.
 
 systemd unit (`/etc/systemd/system/escrow-web.service`):
 

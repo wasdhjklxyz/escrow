@@ -116,7 +116,8 @@ LOGIN_FAILS = 5
 RUN_TIMEOUT = 120
 AGENT_TIMEOUT = 600
 REVIEW_TIMEOUT = 900  # a cold NixOS closure build
-MAX_EVENTS = 500  # system event log entries kept (memory and events.jsonl)
+MAX_EVENTS = 500  # system event log entries kept in memory and shown
+EVENTS_FILE_CAP = 1024 * 1024  # events.jsonl rotates past this
 LOCK_WAIT = 5  # how long a state read waits for a running action
 # Password hashing: scrypt at OWASP's minimum (N=2^17, r=8, p=1, 128 MiB
 # each). The users file stores log2(N) per user, so raising it later keeps
@@ -262,7 +263,7 @@ class World:
         self.events_lock = threading.Lock()
         self.events = collections.deque(maxlen=MAX_EVENTS)
         if self.events_file.exists():
-            for line in self.events_file.read_text().splitlines()[-MAX_EVENTS:]:
+            for line in tail_lines(self.events_file, EVENTS_FILE_CAP).splitlines()[-MAX_EVENTS:]:
                 try:
                     self.events.append(json.loads(line))
                 except ValueError:
@@ -276,6 +277,12 @@ class World:
             self.events.append(e)
             with open(self.events_file, "a") as f:
                 f.write(json.dumps(e) + "\n")
+                big = f.tell() > EVENTS_FILE_CAP
+            if big:  # keep the newest half; the file never grows past the cap
+                keep = tail_lines(self.events_file, EVENTS_FILE_CAP // 2)
+                tmp = self.events_file.with_suffix(".tmp")
+                tmp.write_text(keep)
+                os.replace(tmp, self.events_file)
 
     def pretty(self, args):
         """escrow's argv as a shell line, store and world paths named."""
@@ -554,9 +561,12 @@ class App:
         # can't all pass the limit check; a success takes it back.
         if ":" in ip:  # one IPv6 client owns a /64
             ip = str(ipaddress.ip_network(f"{ip}/64", strict=False))
-        # Two buckets: the address (one guesser) and the user name (many
-        # addresses guessing one account).
+        # Two buckets: the address (5 failures, then 429) and the user name
+        # (many addresses guessing one account). The user-name bucket only
+        # slows answers down: blocking it would let anyone lock the real
+        # user out (with generated 144-bit passwords, guessing is hopeless).
         limits = {ip: LOGIN_FAILS, "user:" + user: LOGIN_USER_FAILS}
+        slow = False
         with self.lock:
             now = time.time()
             if len(self.fails) > 10000:
@@ -565,9 +575,13 @@ class App:
                 recent = [t for t in self.fails.get(k, []) if now - t < LOGIN_WINDOW]
                 self.fails[k] = recent
                 if len(recent) >= limit:
-                    return None, 429
+                    if k == ip:
+                        return None, 429
+                    slow = True
             for k in limits:
                 self.fails[k].append(now)
+        if slow:
+            time.sleep(2)
         users = load_users(self.data)
         # Unknown users still cost one scrypt: no timing oracle for names.
         log2n, salt, want = users.get(user, (SCRYPT_LOG2N, b"\0" * 16, b"\0" * 64))
@@ -761,8 +775,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(400, {"error": "bad request"})
         tok, code = self.app.login(self.client_ip(), user, pw)
         log(f"{self.client_ip()} {user} login {'ok' if tok else 'failed'}")
-        self.app.world.record("login", result="ok" if tok else "refused: wrong password or rate limit",
-                              code=0 if tok else 1, user=user, persona="-")
+        if tok:  # failures stay in the stderr log only: unauthenticated, so unbounded
+            self.app.world.record("login", result="ok", code=0, user=user, persona="-")
         if not tok:
             return self.send(code, {"error": "too many attempts" if code == 429 else "wrong user or password"})
         ck = f"sid={tok}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={SESSION_TTL}"
