@@ -6,32 +6,11 @@ proposal. Nothing is written to the real workspace until three different
 people request, review and sign it, and every step is an SSH signature in
 a hash-chained log an auditor can verify offline.
 
-## In plain English
-
-Companies are starting to let AI agents change real systems: server
-settings, access lists, code. Today that means trusting the agent, or the
-one person who ran it. escrow works like the two-person rule a bank uses
-for large transfers:
-
-1. **The AI works in a sealed room.** It runs inside a locked-down area of
-   the computer where it can't see or touch anything but its task.
-2. **Its work comes out as a proposal, held in escrow.** Nothing it did
-   has reached the real system yet.
-3. **Three different people sign off.** One requests the change, a second
-   reviews exactly what changed, a third approves it. Each sign-off is a
-   digital signature tied to that person, and nobody can approve their own
-   request.
-4. **Only then is the change applied**, all at once.
-5. **Everything is recorded** in a log where changing even one character
-   of history is detected.
-
 ![The escrow web demo: propose, review, sign, apply](docs/img/overview.png)
 
 | Review shows exactly what changes, and who has signed so far | Inside the jail: what the agent can and can't reach |
 |---|---|
 | ![Approval chain and diff](docs/img/review.png) | ![A terminal inside the jail](docs/img/terminal.png) |
-
-![The escape tour: escrow's own attack tests, each blocked, grouped by the layer that stops it](docs/img/escape-tour.png)
 
 ## Why
 
