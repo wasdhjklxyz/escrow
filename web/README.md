@@ -64,6 +64,18 @@ MemoryMax=2G
 WantedBy=multi-user.target
 ```
 
+escrow itself sets no rlimits or cgroups. The server caps each file a run
+writes at 64 MiB (`prlimit --fsize`), and the unit caps memory and tasks, but
+nothing caps total disk: a run can write many files, and each lands on the
+host twice (overlay upper + change set). Put `--data` on its own size-capped
+filesystem so a full disk stops escrow-web, not the box:
+
+```sh
+fallocate -l 4G /var/lib/escrow-web.img && mkfs.ext4 -q /var/lib/escrow-web.img
+mkdir -p /home/escrow/web-data && mount -o loop /var/lib/escrow-web.img /home/escrow/web-data
+chown escrow: /home/escrow/web-data   # and an fstab line to keep it mounted
+```
+
 Install it with `nix profile install .#web` as that user, and warm the store
 once (run the ticket and a closure review) before anyone demos it.
 `web.env` holds the Claude credential, mode 0600. The package brings its own
