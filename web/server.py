@@ -98,6 +98,7 @@ MAX_PASSWORD = 1024
 MIN_PASSWORD = 12
 MAX_OUT = 4 * 1024 * 1024
 MAX_FILE = 64 * 1024
+MAX_LOG = 512 * 1024  # the newest audit log lines sent to the page
 MAX_WRITE = 64 * 1024 * 1024  # largest file a run may write (RLIMIT_FSIZE)
 MAX_FILES = 50
 MAX_FILES_BYTES = 256 * 1024  # all of /api/state's file text (NULs grow 6x in JSON)
@@ -150,6 +151,23 @@ def read_capped(path, cap):
         b = f.read(cap + 1)
     s = b[:cap].decode("utf-8", "replace")
     return s + "\n[truncated]" if len(b) > cap else s
+
+
+def tail_lines(path, cap):
+    """The last whole lines of a log, at most cap bytes; "" if none."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return ""
+    with os.fdopen(fd, "rb") as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            return ""
+        f.seek(max(0, st.st_size - cap))
+        b = f.read(cap)
+    if st.st_size > cap:
+        b = b[b.find(b"\n") + 1:]  # drop the partial first line
+    return b.decode("utf-8", "replace")
 
 
 def rmtree(path):
@@ -332,7 +350,7 @@ class World:
         except FileNotFoundError:
             lines = []
         if len(lines) < 2:
-            return {"ok": False, "code": -1, "stdout": "", "stderr": "escrow-web: the log needs 2 lines first\n",
+            return {"ok": False, "code": -1, "stdout": "", "stderr": "escrow-web: nothing to tamper with yet: propose and review something first\n",
                     "truncated": False}
         lines[0] = lines[0].replace("T", "X", 1)  # its time field (src/log.c)
         with tempfile.TemporaryDirectory(dir=self.root) as d:
@@ -341,10 +359,15 @@ class World:
             (forged / "runs").symlink_to(self.state / "runs")
             r = self.escrow(["verify-log"], state=forged)
         note = "escrow-web: changed one character of line 1 in a copy of the log\n"
+        # Caught means verify-log failed *because* of the edit (src/log.c),
+        # not because it timed out or broke some other way.
+        caught = not r["ok"] and re.search(r"^escrow: log line 2: chain broken", r["stderr"], re.M)
         if r["ok"]:
             note += "escrow-web: verify-log ACCEPTED the forged copy: the demo is broken\n"
+        elif not caught:
+            note += "escrow-web: verify-log failed for another reason, so this shows nothing\n"
         r["stderr"] = note + r["stderr"]
-        r["ok"] = not r["ok"]  # ok: the forgery was caught
+        r["ok"] = bool(caught)
         return r
 
     def proposals(self):
@@ -540,7 +563,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "proposals": proposals,
             "error": error,
             "files": w.files(),
-            "log": read_capped(w.state / "log", MAX_OUT) or "",
+            "log": tail_lines(w.state / "log", MAX_LOG),
         }
 
     def do_POST(self):
@@ -570,7 +593,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         log(f"{self.client_ip()} {self.user} as {persona or '-'}: {path} {rid or ''}")
 
         if path == "/api/reset":
-            return self.send_locked(lambda: (w.reset(), {"ok": True, "stderr": "escrow-web: fresh world\n"})[1])
+            return self.send_locked(lambda: (w.reset(), {"ok": True, "stderr": "escrow-web: demo reset: new keys, fresh workspace, empty audit log\n"})[1])
         if path == "/api/verify":
             if req.get("tamper") is True:
                 return self.send_locked(w.verify_tampered)
