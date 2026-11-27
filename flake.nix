@@ -132,6 +132,24 @@
                 unfree.claude-code
               ];
             };
+
+          # The web front end (web/), with escrow, the demo roles and the demo
+          # workspace baked in: `nix run .#web -- serve --data DIR`. nix is
+          # for `review --closures`, which systemd's PATH wouldn't have.
+          web = pkgs.writeShellApplication {
+            name = "escrow-web";
+            runtimeInputs = with pkgs; [
+              nix
+              openssh
+            ];
+            text = ''
+              export ESCROW=${self.packages.${system}.default}/bin/escrow
+              export ESCROW_WEB_ROLE_DEMO=${self.packages.${system}.role-demo}
+              export ESCROW_WEB_ROLE_CLAUDE=${self.packages.${system}.role-claude}
+              export ESCROW_WEB_WORKSPACE=${./demo/ops}
+              exec ${pkgs.python3.interpreter} ${./web}/server.py "$@"
+            '';
+          };
         }
       );
 
