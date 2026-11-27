@@ -141,13 +141,14 @@
             runtimeInputs = with pkgs; [
               nix
               openssh
+              util-linux # prlimit
             ];
             text = ''
               export ESCROW=${self.packages.${system}.default}/bin/escrow
               export ESCROW_WEB_ROLE_DEMO=${self.packages.${system}.role-demo}
               export ESCROW_WEB_ROLE_CLAUDE=${self.packages.${system}.role-claude}
               export ESCROW_WEB_WORKSPACE=${./demo/ops}
-              exec ${pkgs.python3.interpreter} ${./web}/server.py "$@"
+              exec ${pkgs.python3.interpreter} -I ${./web}/server.py "$@"
             '';
           };
         }
