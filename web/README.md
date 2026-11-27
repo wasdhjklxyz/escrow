@@ -82,4 +82,4 @@ once (run the ticket and a closure review) before anyone demos it.
 `nix` for `review --closures`; it talks to the host's nix daemon.
 
 If an apply was interrupted (server killed mid-apply), later applies refuse
-with "exists (left by a failed apply?)"; Reset the demo world from the page.
+with "exists (left by a failed apply?)"; use "Reset the demo world" at the bottom of the page.
