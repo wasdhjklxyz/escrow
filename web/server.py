@@ -42,6 +42,7 @@ import argparse
 import getpass
 import hashlib
 import hmac
+import ipaddress
 import http.server
 import json
 import os
@@ -84,7 +85,11 @@ TICKET = (
     "Edit the files only; don't build anything."
 )
 ID_RE = re.compile(r"[A-Za-z0-9]{6}")  # src/cmd.c check_id
-PROPOSED_RE = re.compile(r"^escrow: proposed ([A-Za-z0-9]{6}) as ", re.M)  # src/cmd.c cmd_run
+# src/cmd.c cmd_run. Agent-chosen paths can appear raw in escrow's stderr
+# ("not proposable: <path>"), so only the first line (printed before the
+# agent runs) and the last line are trusted.
+RUNDIR_RE = re.compile(r"escrow: run dir: .*/runs/([A-Za-z0-9]{6})")
+PROPOSED_RE = re.compile(r"escrow: proposed ([A-Za-z0-9]{6}) as [a-z]+")
 USER_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 SESSION_TTL = 8 * 3600
 MAX_BODY = 64 * 1024
@@ -93,7 +98,9 @@ MAX_PASSWORD = 1024
 MIN_PASSWORD = 12
 MAX_OUT = 4 * 1024 * 1024
 MAX_FILE = 64 * 1024
+MAX_WRITE = 64 * 1024 * 1024  # largest file a run may write (RLIMIT_FSIZE)
 MAX_FILES = 50
+MAX_FILES_BYTES = 256 * 1024  # all of /api/state's file text (NULs grow 6x in JSON)
 MAX_DEPTH = 4
 LOGIN_WINDOW = 600
 LOGIN_FAILS = 5
@@ -160,7 +167,7 @@ def rmtree(path):
 
 
 def drain(p, timeout):
-    """Read p's stdout and stderr, at most MAX_OUT + 1 bytes each.
+    """Read p's stdout and stderr, about MAX_OUT bytes each (one chunk over).
 
     Never communicate(): it buffers everything, and an agent controls how
     big the diff is (a 2 GB file is a 2 GB review). Past the cap or the
@@ -204,7 +211,7 @@ def capped(b):
     if len(b) <= MAX_OUT:
         return b.decode("utf-8", "replace"), False
     s = b[:MAX_OUT].decode("utf-8", "replace")
-    return s + f"\n[escrow-web: output cut at {MAX_OUT} of {len(b)} bytes: review it on the CLI]\n", True
+    return s + f"\n[escrow-web: output cut at {MAX_OUT} bytes: review it on the CLI]\n", True
 
 
 class World:
@@ -272,7 +279,10 @@ class World:
             env[cred] = os.environ[cred]
         # Own process group: the jail's init is in it, so a timeout kills all.
         p = subprocess.Popen(
-            [ESCROW, *args],
+            # escrow sets no rlimits or cgroups; cap each file the agent (and
+            # escrow) can write. Total disk needs a capped filesystem for
+            # --data (web/README.md); memory and PIDs, the systemd unit.
+            ["prlimit", f"--fsize={MAX_WRITE}", ESCROW, *args],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -280,6 +290,8 @@ class World:
             start_new_session=True,
         )
         out, err = drain(p, timeout)
+        if p.returncode == -signal.SIGXFSZ:
+            err += f"\nescrow-web: a file hit the {MAX_WRITE >> 20} MiB write cap; nothing was proposed\n".encode()
         for e in os.scandir(self.tmp):
             rmtree(e.path)
         stdout, t1 = capped(out)
@@ -291,9 +303,11 @@ class World:
     def run(self, args, timeout=RUN_TIMEOUT, cred=None):
         """A proposing run: ok means escrow proposed, whatever the agent exited."""
         r = self.escrow(args, timeout=timeout, cred=cred)
-        m = PROPOSED_RE.search(r["stderr"])
-        r["id"] = m.group(1) if m else None
-        r["ok"] = bool(m) and not r["truncated"]
+        lines = r["stderr"].splitlines() or [""]
+        first, last = RUNDIR_RE.fullmatch(lines[0]), PROPOSED_RE.fullmatch(lines[-1])
+        ok = bool(first and last and first.group(1) == last.group(1)) and not r["truncated"]
+        r["id"] = last.group(1) if ok else None
+        r["ok"] = ok
         return r
 
     def verify_tampered(self):
@@ -318,6 +332,7 @@ class World:
         if r["ok"]:
             note += "escrow-web: verify-log ACCEPTED the forged copy: the demo is broken\n"
         r["stderr"] = note + r["stderr"]
+        r["ok"] = not r["ok"]  # ok: the forgery was caught
         return r
 
     def proposals(self):
@@ -325,7 +340,7 @@ class World:
 
         cmd is last and one line (record_quoted), principals have no spaces.
         """
-        if not self.state.exists():
+        if not (self.state / "log").exists():  # nothing proposed yet
             return [], ""
         r = self.escrow(["list"])
         if not r["ok"]:
@@ -339,11 +354,16 @@ class World:
 
     def files(self):
         files = []
+        size = 0
 
         def walk(d, rel, depth):
-            if depth > MAX_DEPTH or len(files) >= MAX_FILES:
+            nonlocal size
+            if depth > MAX_DEPTH:
                 return
             for e in sorted(os.scandir(d), key=lambda e: e.name):
+                if len(files) >= MAX_FILES or size >= MAX_FILES_BYTES:
+                    files.append({"path": "…", "text": f"[more files: showing the first {len(files)}]"})
+                    raise StopIteration
                 r = f"{rel}{e.name}"
                 if e.is_symlink():
                     files.append({"path": r, "text": f"-> {os.readlink(e.path)}"})
@@ -351,10 +371,15 @@ class World:
                     walk(e.path, r + "/", depth + 1)
                 elif e.name != "flake.lock":  # demo workspace: noise
                     t = read_capped(e.path, MAX_FILE)
-                    files.append({"path": r, "text": "[not a regular file]" if t is None else t})
+                    t = "[not a regular file]" if t is None else t
+                    size += len(t)
+                    files.append({"path": r, "text": t})
 
         if self.workspace.exists():
-            walk(self.workspace, "", 0)
+            try:
+                walk(self.workspace, "", 0)
+            except StopIteration:
+                pass
         return files
 
 
@@ -369,8 +394,12 @@ class App:
     def login(self, ip, user, password):
         # Count the attempt before the slow scrypt, so concurrent guesses
         # can't all pass the limit check; a success takes it back.
+        if ":" in ip:  # one IPv6 client owns a /64
+            ip = str(ipaddress.ip_network(f"{ip}/64", strict=False))
         with self.lock:
             now = time.time()
+            if len(self.fails) > 10000:
+                self.fails = {k: v for k, v in self.fails.items() if v and now - v[-1] < LOGIN_WINDOW}
             recent = [t for t in self.fails.get(ip, []) if now - t < LOGIN_WINDOW]
             if len(recent) >= LOGIN_FAILS:
                 self.fails[ip] = recent
