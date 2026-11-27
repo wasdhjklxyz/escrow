@@ -62,3 +62,18 @@
 - **in-toto export (later, low).** Statement with subject = changes sha256,
   materials = store paths. SSHSIG isn't DSSE, so stock verifiers need a
   second signer (a dependency).
+- **Independent shell verifier (soon).** A ~50-line script in tests/ that
+  checks a log with only `ssh-keygen -Y verify` and `sha256sum`, following
+  docs/FORMATS.md. It proves the "verifiable offline without escrow" claim;
+  nothing in tests/ does that today.
+- **Browser signing for the web UI (later).** Removes server-held persona
+  keys. OpenSSH's WebAuthn signature type is ECDSA-only
+  (`webauthn-sk-ecdsa-sha2-nistp256@openssh.com`), the browser can't use the
+  `ssh:` rpId, and it's unconfirmed whether `ssh-keygen -Y verify` accepts
+  that signature type. Prototype that check first.
+- **Bind web users to personas (later).** One login, one persona, so the
+  web UI shows SoD the way the CLI enforces it instead of letting any login
+  act as anyone.
+- **Sign what the reviewer saw of the closure diff (later).** `--closures`
+  output is advisory and unsigned; a review signature over its hash is the
+  honest version.
