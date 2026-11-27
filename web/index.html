@@ -54,10 +54,12 @@
           <button data-mode="ticket" class="tab on">Ticket OPS-142</button>
           <button data-mode="claude" class="tab">Claude Code</button>
           <button data-mode="command" class="tab">Any command</button>
+          <button data-mode="tour" class="tab">Escape tour</button>
         </div>
         <div data-pane="ticket" class="pane"><p>A scripted ops agent works this ticket on a small NixOS config:</p><pre id="ticket" class="quote"></pre></div>
         <div data-pane="claude" class="pane" hidden><p>Claude Code runs in the jail with network (TCP 443 only), one credential, and nothing else.</p><textarea id="prompt" rows="5" maxlength="4096"></textarea><p id="no-claude" class="fine" hidden>No Claude credential on this server.</p></div>
         <div data-pane="command" class="pane" hidden><p>Any bash command, run as the agent inside the jail. Try to break out: <code>cat /etc/shadow</code>, <code>ls /home</code>, <code>curl example.com</code>, <code>rm -rf /work/keys</code>.</p><textarea id="command" rows="3" maxlength="4096" spellcheck="false">sed -i 's/extraGroups = \[ \]/extraGroups = [ "wheel" ]/' configuration.nix; echo attacker-key > keys/api.key; ls /home /root 2>&1</textarea></div>
+        <div data-pane="tour" class="pane" hidden><p>escrow's own escape tests, run inside the jail as a hostile agent: read host secrets, write outside, reach host processes, run a smuggled binary, open a connection, mount. Each row is one attempt and the error the kernel gave back, grouped by the layer that stops it. Then the limits. Nothing is proposed.</p><button id="tour-run" class="primary act">Run the escape tour</button><div id="tour" class="tour"></div></div>
         <button id="run" class="primary act" data-need="requester">Run in the jail</button>
         <details id="run-details" hidden><summary id="run-summary"></summary><pre id="run-out" class="out"></pre></details>
       </section>

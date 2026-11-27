@@ -183,4 +183,17 @@ tbody tr.on { background: var(--card); box-shadow: inset 3px 0 0 var(--accent); 
 .toast.bad::before { content: "✕  "; }
 @keyframes toast-in { from { transform: translateY(-8px); opacity: 0; } }
 
+/* escape tour */
+.tour .layer { border-left: 3px solid var(--ink); padding: 4px 0 4px 12px; margin: 16px 0; }
+.tour h4 { font-family: var(--serif); font-weight: 400; font-size: 17px; margin: 0; }
+.tour .layer > p { margin: 0 0 6px; }
+.attempt { display: grid; grid-template-columns: 72px minmax(0, 1fr) minmax(0, 1.3fr); gap: 10px; font-size: 13px; padding: 4px 0; border-bottom: 1px solid var(--rule); align-items: baseline; }
+.attempt .badge { text-align: center; }
+.attempt .why { font: 11.5px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+.attempt.blocked .badge { color: var(--good); background: var(--add); }
+.attempt.escaped .badge, .attempt.error .badge { color: var(--accent); background: var(--del); }
+.attempt.limit { grid-template-columns: 72px minmax(0, 1fr); }
+.attempt.limit .badge { color: var(--amber); background: #fff3d6; }
+@media (max-width: 600px) { .attempt { grid-template-columns: 64px minmax(0, 1fr); } .attempt .why { grid-column: 2; } }
+
 footer { border-top: 1px solid var(--ink); padding-top: 20px; display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }

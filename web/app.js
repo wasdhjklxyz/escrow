@@ -17,7 +17,7 @@ const STEPS = [
   ["sign", "Signed", "signer"],
   ["apply", "Applied", "signer"],
 ];
-const MODES = { ticket: "Ticket OPS-142", claude: "Claude Code", command: "a command" };
+const MODES = { ticket: "Ticket OPS-142", claude: "Claude Code", command: "a command", tour: "Escape tour" };
 let state = null; // last /api/state
 let persona = "alice";
 let mode = "ticket";
@@ -131,6 +131,31 @@ function logEvents() {
 }
 
 // ---- rendering
+
+// web/tour.sh's output: "== layer|meaning" sections, then lib.sh's
+// "BLOCKED|ESCAPED|ERROR attempt: error" lines and "LIMIT text" lines.
+function renderTour(text) {
+  const box = $("#tour");
+  box.replaceChildren();
+  let sec = null;
+  for (const line of text.split("\n")) {
+    const h = /^== ([^|]*)\|(.*)$/.exec(line);
+    if (h) {
+      sec = el("div", "layer");
+      sec.append(el("h4", "", h[1]), el("p", "fine", h[2]));
+      box.append(sec);
+      continue;
+    }
+    const m = /^(BLOCKED|ESCAPED|ERROR|LIMIT) (.*)$/.exec(line);
+    if (!m || !sec) continue;
+    const kind = m[1].toLowerCase();
+    const i = kind === "limit" ? -1 : m[2].indexOf(": ");
+    const row = el("div", "attempt " + kind);
+    row.append(el("span", "badge", kind), el("span", "what", i < 0 ? m[2] : m[2].slice(0, i)));
+    if (i >= 0) row.append(el("span", "why", m[2].slice(i + 2)));
+    sec.append(row);
+  }
+}
 
 function renderPersonas() {
   const box = $("#personas");
@@ -389,6 +414,7 @@ for (const t of $$(".tab"))
     mode = t.dataset.mode;
     for (const x of $$(".tab")) x.classList.toggle("on", x === t);
     for (const p of $$(".pane")) p.hidden = p.dataset.pane !== mode;
+    $("#run").hidden = mode === "tour";
   };
 $("#run").onclick = () =>
   act($("#run"), async () => {
@@ -406,6 +432,17 @@ $("#run").onclick = () =>
     }
   });
 $("#view").onclick = () => act($("#view"), showDiff);
+$("#tour-run").onclick = () =>
+  act($("#tour-run"), async () => {
+    const res = await api("POST", "/api/run", { mode: "tour" });
+    const t = res.tour || "";
+    renderTour(t);
+    const blocked = (t.match(/^BLOCKED/gm) || []).length;
+    const through = (t.match(/^(ESCAPED|ERROR)/gm) || []).length;
+    res.stderr = `escrow-web: ${blocked} attempts blocked, ${through} got through\n` + (res.ok ? "" : res.stderr);
+    if (!res.ok) $("#run-details").hidden = false;
+    report("Escape tour", res, res.ok ? null : $("#run-out"));
+  });
 $("#review").onclick = () =>
   act($("#review"), async () => {
     const id = selected,

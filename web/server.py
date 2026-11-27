@@ -23,7 +23,8 @@ API (JSON; every POST needs `X-Escrow: 1`; all but login need the session):
     POST /api/logout
     GET  /api/state    personas, proposals, workspace files, log
     GET  /api/agentlog ?id=        the agent's own output (runs/<id>/log)
-    POST /api/run      {persona, mode: ticket|command|claude, text}  proposes
+    POST /api/run      {persona, mode: ticket|command|claude, text}  proposes;
+                       {mode: tour}: web/tour.sh, proposes nothing
     POST /api/view     {id, closures}           read-only, logs nothing
     POST /api/review   {id, persona, closures}  signs a review into the log
     POST /api/sign     {id, persona}
@@ -64,12 +65,14 @@ from pathlib import Path
 ESCROW = os.environ.get("ESCROW", "escrow")
 ROLE_DEMO = os.environ.get("ESCROW_WEB_ROLE_DEMO", "")
 ROLE_CLAUDE = os.environ.get("ESCROW_WEB_ROLE_CLAUDE", "")
+ROLE_TEST = os.environ.get("ESCROW_WEB_ROLE_TEST", "")  # the escape tour's toolbox
 WORKSPACE = os.environ.get("ESCROW_WEB_WORKSPACE", "")
 # The credential handed to the Claude agent, if this server has one.
 CRED = next((c for c in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY") if os.environ.get(c)), None)
 if not ROLE_CLAUDE:
     CRED = None
 STATIC = Path(__file__).resolve().parent
+TOUR = (STATIC / "tour.sh").read_text()
 PAGES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
@@ -293,7 +296,7 @@ class World:
         new.rename(self.root)
         self.fps = {}
 
-    def escrow(self, args, timeout=RUN_TIMEOUT, state=None, cred=None):
+    def escrow(self, args, timeout=RUN_TIMEOUT, state=None, cred=None, extra_env=None):
         """Run escrow; {ok, code, stdout, stderr, truncated}.
 
         code is escrow's exit status, negative if killed by a signal (-9
@@ -307,6 +310,7 @@ class World:
         env["TMPDIR"] = str(self.tmp)  # review --closures' copies; wiped below
         if cred:
             env[cred] = os.environ[cred]
+        env.update(extra_env or {})
         # Own process group: the jail's init is in it, so a timeout kills all.
         p = subprocess.Popen(
             # escrow sets no rlimits or cgroups; cap each file the agent (and
@@ -338,6 +342,30 @@ class World:
         ok = bool(first and last and first.group(1) == last.group(1)) and not r["truncated"]
         r["id"] = last.group(1) if ok else None
         r["ok"] = ok
+        return r
+
+    def tour(self):
+        """web/tour.sh in the jail under role-test, no --key: proposes nothing.
+
+        The cases (tests/escape) try to reach host facts passed as arguments;
+        afterwards this server checks from outside that nothing got through.
+        """
+        policy = Path(ROLE_TEST).read_text().splitlines()
+        env_dir = next(l[4:] for l in policy if l.startswith("env "))
+        nstore = sum(l.startswith("store ") for l in policy)
+        pwned = f"escrow-web-pwned-{os.getpid()}"
+        r = self.escrow(
+            ["--role", ROLE_TEST, "--workspace", str(self.workspace), "--", "bash", "-c", TOUR, "tour",
+             f"{env_dir}/share/escrow-tests/escape", str(Path.home()), pwned, str(os.getpid()), str(nstore)],
+            extra_env={"ESCAPE_SECRET": "canary"},  # read_secrets: must not reach the agent
+        )
+        m = RUNDIR_RE.fullmatch((r["stderr"].splitlines() or [""])[0])
+        text = (read_capped(self.state / "runs" / m.group(1) / "log", MAX_OUT) or "") if m else ""
+        text += "== Checked from outside, by this server|the host after the run\n"
+        for p in (Path.home() / pwned, Path("/tmp") / pwned):
+            text += f"{'ESCAPED' if os.path.lexists(p) else 'BLOCKED'} write {p}: {'exists' if os.path.lexists(p) else 'not there'}\n"
+        r["tour"] = text
+        r["ok"] = r["code"] == 0 and not re.search(r"^(ESCAPED|ERROR)", text, re.M)
         return r
 
     def verify_tampered(self):
@@ -629,6 +657,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def run(self, req, key):
         w = self.app.world
         mode, text = req.get("mode"), req.get("text", "")
+        if mode == "tour" and ROLE_TEST:
+            return self.send_locked(w.tour)
         if key is None or not isinstance(text, str) or len(text) > MAX_TEXT:
             return self.send(400, {"error": "bad request"})
         base = ["--key", key, "--workspace", str(w.workspace)]
